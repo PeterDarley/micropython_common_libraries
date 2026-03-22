@@ -301,10 +301,10 @@ class I2CManager:
             name: str,
             address: int,
             temp_offset: float = 50.0,
-            oversampling=qmc5883l.CONFIG_OS64,
-            gauss=qmc5883l.CONFIG_2GAUSS,
-            rate=qmc5883l.CONFIG_100HZ,
-            mode=qmc5883l.CONFIG_CONT,
+            oversampling=None,
+            gauss=None,
+            rate=None,
+            mode=None,
         ) -> None:
             """Initialize the device."""
 
@@ -314,10 +314,10 @@ class I2CManager:
             self.data = bytearray(9)
             self.temp_offset = temp_offset
 
-            self.oversampling = oversampling
-            self.gauss = gauss
-            self.rate = rate
-            self.mode = mode
+            self.oversampling = oversampling if oversampling is not None else qmc5883l.CONFIG_OS64
+            self.gauss = gauss if gauss is not None else qmc5883l.CONFIG_2GAUSS
+            self.rate = rate if rate is not None else qmc5883l.CONFIG_100HZ
+            self.mode = mode if mode is not None else qmc5883l.CONFIG_CONT
 
             # Reset the device.
             self.command[0] = 1
