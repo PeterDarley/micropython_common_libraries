@@ -71,11 +71,186 @@ def _url_decode(encoded_string):
     return result
 
 
+def _resolve_variable(expression, context):
+    """Resolve a dot-notation variable expression against a context dict.
+
+    Supports ``variable``, ``variable.key`` (dict), and ``variable.index`` (list/tuple).
+    Returns an empty string if the variable or any part of the path is not found.
+    """
+
+    parts = expression.strip().split(".")
+    value = context.get(parts[0])
+
+    for part in parts[1:]:
+        if value is None:
+            return ""
+
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif isinstance(value, (list, tuple)):
+            try:
+                value = value[int(part)]
+            except (ValueError, IndexError):
+                return ""
+        else:
+            return ""
+
+    return "" if value is None else str(value)
+
+
+def _evaluate_condition(expression, context):
+    """Evaluate a conditional expression against a context dict.
+
+    Supports:
+    - Simple variables: ``variable``, ``variable.key``, ``variable.0``
+    - Equality comparisons: ``variable == value`` or ``variable == variable2``
+
+    Returns True if the condition is truthy, False otherwise.
+    Falsy values: empty string, '0', 'False', 'None'.
+    """
+
+    expression = expression.strip()
+
+    # Check for == operator
+    if "==" in expression:
+        parts = expression.split("==", 1)
+        if len(parts) == 2:
+            left = _resolve_variable(parts[0].strip(), context)
+            right = _resolve_variable(parts[1].strip(), context)
+            return left == right
+
+    # Simple variable evaluation
+    resolved = _resolve_variable(expression, context)
+    return resolved not in ("", "0", "False", "None")
+
+
+def _apply_context(text, context):
+    """Replace all ``{{ expression }}`` placeholders in text using context.
+
+    Supports simple variable names and dot-notation (e.g. ``variable.key`` or
+    ``variable.0``). Unknown variables are replaced with an empty string.
+    """
+
+    result = ""
+    pos = 0
+
+    while pos < len(text):
+        start = text.find("{{", pos)
+        if start == -1:
+            result += text[pos:]
+            break
+
+        end = text.find("}}", start + 2)
+        if end == -1:
+            result += text[pos:]
+            break
+
+        result += text[pos:start]
+        expression = text[start + 2 : end].strip()
+        result += _resolve_variable(expression, context)
+        pos = end + 2
+
+    return result
+
+
+def _process_if_blocks(text, context):
+    """Process ``{% if expression %}...{% endif %}`` blocks in text.
+
+    Supports simple variables and equality comparisons:
+    - ``{% if variable %}`` — true if truthy (non-empty, not '0', 'False', 'None')
+    - ``{% if variable.key }}`` — dot-notation access
+    - ``{% if variable == value }}`` — equality check (variable can use dot-notation)
+    - ``{% else %}`` blocks are also supported
+
+    Nested ``{% if %}`` blocks are handled correctly via depth tracking.
+    """
+
+    while "{% if" in text:
+        start = text.find("{% if")
+        if start == -1:
+            break
+
+        if_start = text.find("%}", start)
+        if if_start == -1:
+            break
+
+        if_tag = text[start + 2 : if_start].strip()
+        parts = if_tag.split(None, 1)
+
+        if len(parts) >= 2 and parts[0] == "if":
+            expression = parts[1].strip()
+
+            # Find the matching endif and any else by tracking nesting depth
+            depth = 1
+            search_pos = if_start + 2
+            endif_start = -1
+            else_start = -1
+
+            while depth > 0 and search_pos < len(text):
+                next_if = text.find("{% if", search_pos)
+                next_else = text.find("{% else %}", search_pos) if depth == 1 else -1
+                next_endif = text.find("{% endif %}", search_pos)
+
+                # Find the earliest tag
+                candidates = []
+                if next_if != -1:
+                    candidates.append((next_if, "if"))
+                if next_else != -1:
+                    candidates.append((next_else, "else"))
+                if next_endif != -1:
+                    candidates.append((next_endif, "endif"))
+
+                if not candidates:
+                    break
+
+                candidates.sort(key=lambda x: x[0])
+                next_pos, next_type = candidates[0]
+
+                if next_type == "if":
+                    depth += 1
+                    search_pos = next_if + 5
+                elif next_type == "else":
+                    else_start = next_else
+                    search_pos = next_else + 10
+                elif next_type == "endif":
+                    depth -= 1
+                    if depth == 0:
+                        endif_start = next_endif
+                    search_pos = next_endif + 11
+
+            if endif_start == -1:
+                text = text[:start] + text[if_start + 2 :]
+                continue
+
+            # Extract if body and else body
+            if else_start != -1:
+                if_body = text[if_start + 2 : else_start]
+                else_body = text[else_start + 10 : endif_start]
+            else:
+                if_body = text[if_start + 2 : endif_start]
+                else_body = ""
+
+            # Evaluate condition
+            is_truthy = _evaluate_condition(expression, context)
+
+            if is_truthy:
+                text = text[:start] + if_body + text[endif_start + 11 :]
+            else:
+                text = text[:start] + else_body + text[endif_start + 11 :]
+        else:
+            # Malformed if tag, skip it
+            text = text[:start] + text[if_start + 2 :]
+
+    return text
+
+
 def render_template(template_file, context=None, templates_dir="templates"):
     """Load a template file and substitute ``{{ key }}`` placeholders.
 
     Also supports ``{% include 'filename' %}`` to include other templates
-    with the same context.
+    with the same context, ``{% for var in list %}...{% endfor %}`` loops,
+    ``{% if expression %}...{% endif %}`` conditionals (including == comparisons),
+    and dot-notation for dicts/lists (e.g. ``{{ item.key }}``, ``{{ item.0 }}``).
 
     Args:
         template_file: Filename inside *templates_dir* (e.g. ``'index.html'``).
@@ -99,15 +274,106 @@ def render_template(template_file, context=None, templates_dir="templates"):
 
     text = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
 
-    # Replace known context keys (handle common spacing variants).
-    for key, val in context.items():
-        sval = "" if val is None else str(val)
-        text = text.replace("{{ " + key + " }}", sval)
-        text = text.replace("{{" + key + "}}", sval)
-        text = text.replace("{{ " + key + "}}", sval)
-        text = text.replace("{{" + key + " }}", sval)
+    # Handle for loops: {% for var in list %}...{% endfor %}
+    while "{% for" in text:
+        start = text.find("{% for")
+        if start == -1:
+            break
+
+        # Find the matching endfor
+        for_start = text.find("%}", start)
+        if for_start == -1:
+            break
+
+        # Extract for tag content
+        for_tag = text[start + 2 : for_start].strip()
+
+        # Parse: for var in list_name
+        parts = for_tag.split()
+        if len(parts) >= 4 and parts[0] == "for" and parts[2] == "in":
+            var_name = parts[1]
+            list_name = parts[3]
+
+            # Find matching endfor by tracking nesting depth
+            depth = 1
+            search_pos = for_start + 2
+            endfor_start = -1
+
+            while depth > 0 and search_pos < len(text):
+                next_for = text.find("{% for", search_pos)
+                next_endfor = text.find("{% endfor %}", search_pos)
+
+                # Determine which comes first
+                if next_for != -1 and (next_endfor == -1 or next_for < next_endfor):
+                    # Found another for loop first
+                    depth += 1
+                    search_pos = next_for + 6
+                elif next_endfor != -1:
+                    # Found an endfor
+                    depth -= 1
+                    if depth == 0:
+                        endfor_start = next_endfor
+                    search_pos = next_endfor + 12
+                else:
+                    # No more tags found
+                    break
+
+            if endfor_start == -1:
+                text = text[:start] + text[for_start + 2 :]
+                continue
+
+            # Extract loop body
+            loop_body = text[for_start + 2 : endfor_start]
+
+            # Get the list from context
+            if list_name in context:
+                items = context[list_name]
+                rendered_loop = ""
+
+                try:
+                    # Make items iterable
+                    if not isinstance(items, (list, tuple)):
+                        items = [items]
+
+                    # Render loop body for each item
+                    for item in items:
+                        loop_context = dict(context)
+                        loop_context[var_name] = item
+                        loop_text = _process_if_blocks(loop_body, loop_context)
+                        loop_text = _process_includes(loop_text, loop_context, templates_dir)
+                        rendered_loop += _apply_context(loop_text, loop_context)
+
+                    # Replace the entire for loop with rendered content
+                    text = text[:start] + rendered_loop + text[endfor_start + 12 :]
+                except Exception:
+                    # On error, remove the loop tag
+                    text = text[:start] + text[endfor_start + 12 :]
+            else:
+                # List not found, remove loop
+                text = text[:start] + text[endfor_start + 12 :]
+        else:
+            # Malformed for tag, skip it
+            text = text[:start] + text[for_start + 2 :]
+
+    # Process {% if %}...{% endif %} conditionals.
+    text = _process_if_blocks(text, context)
+
+    # Replace all {{ ... }} placeholders (supports dot-notation).
+    text = _apply_context(text, context)
 
     # Handle template includes: {% include 'filename' %}
+    text = _process_includes(text, context, templates_dir)
+
+    return text
+
+
+def _process_includes(text, context, templates_dir):
+    """Process ``{% include 'filename' %}`` tags in text.
+
+    Loads and renders each included template with the current context,
+    so loop variables and other context values are available in includes.
+    """
+
     while "{%" in text:
         start = text.find("{%")
         end = text.find("%}", start)
@@ -116,7 +382,6 @@ def render_template(template_file, context=None, templates_dir="templates"):
 
         tag_content = text[start + 2 : end].strip()
         if tag_content.startswith("include"):
-            # Extract the filename from: include 'filename' or include "filename" or include filename
             include_part = tag_content[7:].strip()
             include_filename = None
 
@@ -134,14 +399,6 @@ def render_template(template_file, context=None, templates_dir="templates"):
                     continue
 
         # If we get here, skip this tag (malformed include or other tag)
-        text = text[:start] + text[end + 2 :]
-
-    # Erase any remaining {{ ... }} placeholders not present in context.
-    while "{{" in text:
-        start = text.index("{{")
-        end = text.find("}}", start)
-        if end == -1:
-            break
         text = text[:start] + text[end + 2 :]
 
     return text

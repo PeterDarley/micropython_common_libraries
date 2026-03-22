@@ -47,9 +47,6 @@ class Animation:
     def _run(self):
         """Internal thread target: loop calling tick() until stopped."""
 
-        self.stopped = False
-        self.running = True
-
         while not self.stopped:
             self.tick()
             time.sleep_ms(self.frame_interval_ms)
@@ -62,6 +59,9 @@ class Animation:
         if self.running:
             return
 
+        self.stopped = False
+        self.running = True
+
         if _THREAD:
             _thread.start_new_thread(self._run, ())
         else:
@@ -71,6 +71,7 @@ class Animation:
         """Stop the animation loop."""
 
         self.stopped = True
+        self.running = False
 
         for name, callback in self.jobs_callbacks.items():
             callback()

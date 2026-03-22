@@ -85,6 +85,7 @@ class Lighting:
             self.scene_name = scene_name
 
         if self.scene_name != current_scene and hasattr(self, "animation"):
+            self.leds.clear()
             self.animation.reset()
 
     def stop(self):
