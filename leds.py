@@ -27,7 +27,9 @@ except Exception:
 class LEDs:
     _instances = {}
 
-    def __new__(cls, pin=None, n=None, brightness=1.0, pin_inverted=False):
+    def __new__(
+        cls, pin: int | None = None, n: int | None = None, brightness: float = 1.0, pin_inverted: bool = False
+    ):
         """Return an existing instance for the given pin, or create a new one."""
         pin_num = pin if pin is not None else (NEOPIXELS["Pin"] if NEOPIXELS else None)
 
@@ -39,7 +41,9 @@ class LEDs:
         cls._instances[pin_num] = instance
         return instance
 
-    def __init__(self, pin=None, count=None, brightness=1.0, pin_inverted=False):
+    def __init__(
+        self, pin: int | None = None, count: int | None = None, brightness: float = 1.0, pin_inverted: bool = False
+    ):
         """Create a neopixel LED strip controller.
 
         - pin: integer GPIO pin number or `machine.Pin` instance (defaults to NEOPIXELS['Pin'] from settings)
@@ -74,12 +78,12 @@ class LEDs:
         self.brightness = brightness
         self._initialised = True
 
-    def _scale(self, color):
+    def _scale(self, color: tuple) -> tuple:
         if self._brightness >= 0.999:
             return tuple(int(min(255, max(0, c))) for c in color)
         return tuple(int(min(255, max(0, int(c * self._brightness)))) for c in color)
 
-    def set(self, target, color):
+    def set(self, target: int | list | str, color: tuple) -> None:
         """Set pixel `target` to `color` (r,g,b). Does not write to strip until `show()` is called."""
 
         if isinstance(target, int):
@@ -97,29 +101,44 @@ class LEDs:
         for index in indexes:
             self._np[index] = self._scale(color)
 
-    def get(self, index):
+    def get(self, index: int) -> tuple:
         """Return the raw value currently staged for pixel `index` (after brightness scaling)."""
         if index < 0 or index >= self.count:
             return (0, 0, 0)
         return tuple(self._np[index])
 
-    def fill(self, color):
+    def fill(self, color: tuple) -> None:
         """Fill the entire strip with `color` (r,g,b)."""
         scaled = self._scale(color)
         for i in range(self.count):
             self._np[i] = scaled
 
-    def range(self, start, end, color):
+    def range(self, start: int, end: int, color: tuple) -> None:
         """Set pixels from `start` to `end` (exclusive) to `color` (r,g,b)."""
         scaled = self._scale(color)
         for i in range(max(0, start), min(self.count, end)):
             self._np[i] = scaled
 
-    def clear(self):
+    def identify(self, indexes: list | int) -> None:
+        """Turn the given LED indexes white and all others black."""
+
+        if isinstance(indexes, int):
+            indexes = [indexes]
+
+        target_set = set(indexes)
+        white = self._scale((255, 255, 255))
+        black = (0, 0, 0)
+
+        for i in range(self.count):
+            self._np[i] = white if i in target_set else black
+
+        self.show()
+
+    def clear(self) -> None:
         """Clear the strip (set all pixels to off)."""
         self.fill((0, 0, 0))
 
-    def show(self):
+    def show(self) -> None:
         """Push the currently staged colors to the LEDs."""
         try:
             self._np.write()
@@ -132,7 +151,7 @@ class LEDs:
         return self._brightness
 
     @brightness.setter
-    def brightness(self, v):
+    def brightness(self, v: float) -> None:
         try:
             f = float(v)
         except Exception:
@@ -144,7 +163,7 @@ class LEDs:
         self._brightness = f
 
     @staticmethod
-    def wheel(pos):
+    def wheel(pos: int) -> tuple:
         """Generate rainbow colors across 0-255."""
         pos = pos % 256
         if pos < 85:

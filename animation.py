@@ -35,6 +35,7 @@ class Animation:
         self.frame_interval_ms = 25
         self.jobs = jobs if jobs is not None else {}
         self.jobs_callbacks = stop_callbacks if stop_callbacks is not None else {}
+        self._paused_state = None
 
     def add_job(self, name: str, job):
         """Add a job to the animation."""
@@ -80,6 +81,29 @@ class Animation:
         """Reset the animation to its initial state."""
 
         self.tick_number = 0
+
+    def pause(self):
+        """Pause the animation, storing its current state."""
+
+        if not self.running:
+            return
+
+        self._paused_state = {
+            "tick_number": self.tick_number,
+            "stopped": self.stopped,
+            "running": self.running,
+        }
+        self.stop()
+
+    def resume(self):
+        """Resume the animation from its paused state."""
+
+        if self._paused_state is None:
+            return
+
+        self.tick_number = self._paused_state["tick_number"]
+        self._paused_state = None
+        self.start()
 
     def tick(self):
         """Perform one frame of the animation. Override in subclasses."""
