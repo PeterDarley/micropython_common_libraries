@@ -59,6 +59,7 @@ class Lighting:
                 "Dark": {"all_dark": {"function": "solid", "target": "all", "colors": ["black"]}},
                 "Flood": {"all_flood": {"function": "solid", "target": "all", "colors": ["white"]}},
             },
+            "named_ranges": {},
         }
 
         self.settings = self.settings_object["lighting_settings"]
