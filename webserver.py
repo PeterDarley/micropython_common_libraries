@@ -519,7 +519,6 @@ class WebServer:
     def _handle_client(self, cl_sock):
         """Read one HTTP request from *cl_sock* and send a response."""
 
-        _request_counted = False
         try:
             try:
                 self._log("websrv: accepted connection from", cl_sock.getpeername())
@@ -616,9 +615,6 @@ class WebServer:
             except Exception:
                 pass
             gc.collect()
-            # Decrement active request count; call after_request hook only when last
-            if _request_counted:
-                pass
 
     def _file_exists(self, path):
         """Return True if *path* exists on the filesystem."""
@@ -933,8 +929,6 @@ class View:
         """
 
         self.request = request
-
-        print(f"Dispatching {request.method} request for {request.path}")
 
         if request.method == "GET":
             return self.get()
