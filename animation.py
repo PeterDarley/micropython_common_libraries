@@ -49,7 +49,10 @@ class Animation:
         """Internal thread target: loop calling tick() until stopped."""
 
         while not self.stopped:
-            self.tick()
+            try:
+                self.tick()
+            except Exception as e:
+                print(f"animation: tick error: {e}")
             time.sleep_ms(self.frame_interval_ms)
 
         self.running = False
