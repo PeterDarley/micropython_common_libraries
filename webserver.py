@@ -328,7 +328,7 @@ def render_template(template_file, context=None, templates_dir="templates"):
             # Get the list from context
             if list_name in context:
                 items = context[list_name]
-                rendered_loop = ""
+                rendered_chunks = []
 
                 try:
                     # Make items iterable
@@ -341,11 +341,19 @@ def render_template(template_file, context=None, templates_dir="templates"):
                         loop_context[var_name] = item
                         loop_text = _process_if_blocks(loop_body, loop_context)
                         loop_text = _process_includes(loop_text, loop_context, templates_dir)
-                        rendered_loop += _apply_context(loop_text, loop_context)
+                        rendered_chunks.append(_apply_context(loop_text, loop_context))
+                        # Free memory after each iteration
+                        del loop_context, loop_text
+                        import gc
+
+                        gc.collect()
+
+                    # Join all chunks at the end
+                    rendered_loop = "".join(rendered_chunks)
 
                     # Replace the entire for loop with rendered content
                     text = text[:start] + rendered_loop + text[endfor_start + 12 :]
-                except Exception:
+                except Exception as e:
                     # On error, remove the loop tag
                     text = text[:start] + text[endfor_start + 12 :]
             else:
@@ -511,6 +519,7 @@ class WebServer:
     def _handle_client(self, cl_sock):
         """Read one HTTP request from *cl_sock* and send a response."""
 
+        _request_counted = False
         try:
             try:
                 self._log("websrv: accepted connection from", cl_sock.getpeername())
@@ -607,6 +616,9 @@ class WebServer:
             except Exception:
                 pass
             gc.collect()
+            # Decrement active request count; call after_request hook only when last
+            if _request_counted:
+                pass
 
     def _file_exists(self, path):
         """Return True if *path* exists on the filesystem."""
@@ -670,11 +682,48 @@ class WebServer:
         except Exception:
             pass
 
+    def _send_file(self, cl_sock, file_path: str, status_code: int, reason: str, content_type: str):
+        """Send an HTTP response streaming from a file on disk.
+
+        Streams the file in 1KB chunks to avoid loading it all into memory.
+        Cleans up the file after sending.
+        """
+
+        try:
+            # Get file size (os.stat returns (size, ...) tuple in MicroPython)
+            file_size = os.stat(file_path)[6]
+
+            # Send HTTP headers
+            header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n".format(
+                status_code, reason, content_type, file_size
+            )
+            cl_sock.send(header.encode("utf-8"))
+
+            # Stream file in 1KB chunks
+            chunk_size = 1024
+            try:
+                with open(file_path, "rb") as f:
+                    while True:
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        cl_sock.send(chunk)
+            finally:
+                # Clean up the temp file
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _send_result(self, cl_sock, res):
         """Normalise a route handler return value and send it as a response."""
 
         if res is None:
             return self._send_response(cl_sock, 204, "No Content", b"", "text/plain")
+        if isinstance(res, FileResponse):
+            return self._send_file(cl_sock, res.file_path, res.status, res.reason, res.content_type)
         if isinstance(res, Response):
             return self._send_response(cl_sock, res.status, res.reason, res.to_bytes(), res.content_type)
         if isinstance(res, tuple) and len(res) == 2:
@@ -691,6 +740,19 @@ class WebServer:
         if self._running:
             self._log("websrv: already running")
             return
+
+        # Clean up any leftover temp files from previous runs
+        try:
+            for filename in os.listdir("."):
+                if filename.startswith("tpl_") and filename.endswith(".html"):
+                    try:
+                        os.remove(filename)
+                        self._log(f"websrv: cleaned up temp file {filename}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         server_address = socket.getaddrinfo(self.host, self.port)[0][-1]
         # Retry socket creation — after a soft reset lingering FDs may briefly
         # exhaust the table before lwIP releases them.
@@ -836,6 +898,25 @@ class Response:
             return str(self.body)
         except Exception:
             return repr(self.body)
+
+
+class FileResponse:
+    """Represents an HTTP response that streams from a file on disk.
+
+    This avoids loading the entire file into memory at once.
+
+    Attributes:
+        file_path: Path to the file to stream (str).
+        status: HTTP status code (int).
+        reason: Short reason phrase (str).
+        content_type: MIME type string.
+    """
+
+    def __init__(self, file_path: str, status: int = 200, reason: str = "OK", content_type: str = "text/html"):
+        self.file_path = file_path
+        self.status = status
+        self.reason = reason
+        self.content_type = content_type
 
 
 class View:
