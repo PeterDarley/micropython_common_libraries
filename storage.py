@@ -144,8 +144,8 @@ class PersistentDict:
 
     def clear(self):
         """Clear all items from the dict."""
+
         self._ensure_loaded()
-        self._data.clear()
         self._data.clear()
 
 
