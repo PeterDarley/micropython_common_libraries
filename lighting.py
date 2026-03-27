@@ -24,31 +24,31 @@ class Lighting:
             "default_scene": "Test Scene",
             "scenes": {
                 "Test Scene": {
-                    "blink_1": {"target": 0, "patern": "blink", "frequency": 2, "colors": ["white", "black"]},
-                    "blink_2": {"target": "1-3", "patern": "blink", "frequency": 1, "colors": ["red", "blue"]},
+                    "blink_1": {"target": 0, "pattern": "blink", "frequency": 2, "colors": ["white", "black"]},
+                    "blink_2": {"target": "1-3", "pattern": "blink", "frequency": 1, "colors": ["red", "blue"]},
                     "pulse_1": {
                         "target": 4,
-                        "patern": "pulse",
+                        "pattern": "pulse",
                         "frequency": 1.3,
                         "duration": 1,
                         "colors": ["white", "black"],
                     },
                     "fade_in_1": {
                         "target": 5,
-                        "patern": "fade_in",
+                        "pattern": "fade_in",
                         "duration": 120,
                         "colors": ["red", "blue"],
                     },
-                    "solid_1": {"patern": "solid", "target": 6, "colors": ["purple"]},
+                    "solid_1": {"pattern": "solid", "target": 6, "colors": ["purple"]},
                     "breath_1": {
                         "target": [7, 8, 10],
-                        "patern": "breathe",
+                        "pattern": "breathe",
                         "frequency": 0.5,
                         "colors": ["red", "blue"],
                     },
                     "sizzle_1": {
                         "target": "11-13",
-                        "patern": "sizzle",
+                        "pattern": "sizzle",
                         "frequency": 40,
                         "variation": 20,
                         # "colors": [(100, 0, 0)],
@@ -56,8 +56,9 @@ class Lighting:
                         "heat": 5,
                     },
                 },
-                "Dark": {"all_dark": {"patern": "solid", "target": "all", "colors": ["black"]}},
-                "Flood": {"all_flood": {"patern": "solid", "target": "all", "colors": ["white"]}},
+                # "Wave": {"all_wave": {"pattern": "wave", "target": "0-15", "colors": ["blue", "green"]}},
+                "Dark": {"all_dark": {"pattern": "solid", "target": "all", "colors": ["black"]}},
+                "Flood": {"all_flood": {"pattern": "solid", "target": "all", "colors": ["white"]}},
             },
             "named_ranges": {},
         }
@@ -101,9 +102,9 @@ class Lighting:
         """Process a single tick of the lighting system."""
 
         for name, job in self.settings["scenes"][self.scene_name].items():
-            patern_name = "patern_" + job["patern"]
-            if hasattr(self, patern_name):
-                func = getattr(self, patern_name)
+            pattern_name = "pattern_" + job["pattern"]
+            if hasattr(self, pattern_name):
+                func = getattr(self, pattern_name)
                 func(job, tick_number)
 
         try:
@@ -156,35 +157,35 @@ class Lighting:
             if self.leds.get(target) != color:
                 self.leds.set(target, color)
 
-    def patern_solid(self, job, tick):
+    def pattern_solid(self, job, tick):
         """Simple solid color function for a lighting job."""
 
         job_colors = self.get_color(job["colors"])
         self._set_targets(self.get_targets(job["target"]), job_colors[0])
 
-    def patern_blink(self, job, tick):
+    def pattern_blink(self, job, tick):
         """Simple blink function for a lighting job."""
 
         interval = 40 // job.get("frequency", None)
         duration = interval
         colors = self.get_color(job["colors"])
 
-        self.patern_periodic(
+        self.pattern_periodic(
             tick=tick, interval=interval, duration=duration, colors=colors, targets=self.get_targets(job["target"])
         )
 
-    def patern_pulse(self, job, tick):
+    def pattern_pulse(self, job, tick):
         """Simple pulse function for a lighting job."""
 
         duration = job["duration"]
         interval = 40 // job.get("frequency", None) - duration
         colors = self.get_color(job["colors"])
 
-        self.patern_periodic(
+        self.pattern_periodic(
             tick=tick, interval=interval, duration=duration, colors=colors, targets=self.get_targets(job["target"])
         )
 
-    def patern_periodic(self, tick, interval, duration, colors, targets):
+    def pattern_periodic(self, tick, interval, duration, colors, targets):
         """blink function for a lighting job."""
 
         cycle_length = duration + interval
@@ -196,7 +197,7 @@ class Lighting:
             else:
                 self.leds.set(target, colors[1])
 
-    def patern_fade_in(self, job, tick):
+    def pattern_fade_in(self, job, tick):
         """Simple fade in function for a lighting job."""
 
         job_colors = self.get_color(job["colors"])
@@ -204,7 +205,7 @@ class Lighting:
         phase = min(tick / job["duration"], 1.0)
         self._set_targets(targets, self._linear_color(job_colors[0], job_colors[1], phase))
 
-    def patern_breathe(self, job, tick):
+    def pattern_breathe(self, job, tick):
         """Breathe function: uses sin() to smoothly modulate between two colors."""
 
         job_colors = self.get_color(job["colors"])
@@ -212,7 +213,7 @@ class Lighting:
         phase = (math.sin(2 * math.pi * job.get("frequency", 1) * tick / 40) + 1) / 2
         self._set_targets(targets, self._linear_color(job_colors[0], job_colors[1], phase))
 
-    def patern_sizzle(self, job, tick):
+    def pattern_sizzle(self, job, tick):
         """Sizzle function: fluctuates around a base color with random variations."""
 
         job_colors = self.get_color(job["colors"])
