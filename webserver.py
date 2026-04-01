@@ -661,7 +661,7 @@ class WebServer:
                 return mime
         return "application/octet-stream"
 
-    def _send_response(self, cl_sock, status_code, reason, content, content_type="text/html"):
+    def _send_response(self, cl_sock, status_code, reason, content, content_type="text/html", extra_headers=None):
         """Send an HTTP response to the client socket."""
 
         try:
@@ -669,9 +669,13 @@ class WebServer:
                 body_bytes = content.encode("utf-8")
             else:
                 body_bytes = content or b""
-            header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n".format(
+            header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}".format(
                 status_code, reason, content_type, len(body_bytes)
             )
+            if extra_headers:
+                for key, value in extra_headers.items():
+                    header += "\r\n{}: {}".format(key, value)
+            header += "\r\n\r\n"
             cl_sock.send(header.encode("utf-8"))
             if body_bytes:
                 cl_sock.send(body_bytes)
@@ -721,7 +725,9 @@ class WebServer:
         if isinstance(res, FileResponse):
             return self._send_file(cl_sock, res.file_path, res.status, res.reason, res.content_type)
         if isinstance(res, Response):
-            return self._send_response(cl_sock, res.status, res.reason, res.to_bytes(), res.content_type)
+            return self._send_response(
+                cl_sock, res.status, res.reason, res.to_bytes(), res.content_type, res.headers or None
+            )
         if isinstance(res, tuple) and len(res) == 2:
             return self._send_response(cl_sock, 200, "OK", res[0], res[1])
         if isinstance(res, bytes):
@@ -859,6 +865,12 @@ class Request:
         self.headers = headers or {}
         self.body = body
         self.form_data = form_data or {}
+
+    @property
+    def query_params(self) -> dict:
+        """Return the decoded query string parameters as a dict."""
+
+        return _parse_form_data(self.query)
 
 
 class Response:
