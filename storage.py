@@ -148,5 +148,11 @@ class PersistentDict:
         self._ensure_loaded()
         self._data.clear()
 
+    def __iter__(self):
+        """Iterate over the dict keys."""
+
+        self._ensure_loaded()
+        return iter(self._data)
+
 
 storage = PersistentDict("storage.json")
