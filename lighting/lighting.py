@@ -48,106 +48,106 @@ colors = {
 class Lighting:
     def __init__(self):
         self.settings_object = PersistentDict()
-        self.settings_object["lighting_settings"] = {
-            "default_scene": "Engines",
-            "scenes": {
-                "Test Scene": {
-                    "blink_1": {"target": 0, "pattern": "blink", "frequency": 2, "colors": ["white", "black"]},
-                    "blink_2": {"target": "1-3", "pattern": "blink", "frequency": 1, "colors": ["red", "blue"]},
-                    "pulse_1": {
-                        "target": 4,
-                        "pattern": "pulse",
-                        "frequency": 1.3,
-                        "duration": 1,
-                        "colors": ["white", "black"],
-                    },
-                    "fade_in_1": {
-                        "target": 5,
-                        "pattern": "fade_in",
-                        "duration": 120,
-                        "colors": ["red", "blue"],
-                    },
-                    "solid_1": {"pattern": "solid", "target": 6, "colors": ["purple"]},
-                    "breath_1": {
-                        "target": [7, 8, 10],
-                        "pattern": "breathe",
-                        "frequency": 0.5,
-                        "colors": ["red", "blue"],
-                    },
-                },
-                "Wave": {
-                    "wave_1": {
-                        "pattern": "wave",
-                        "target": "0-14",
-                        "frequency": 1,
-                        "number": 2,
-                        "width": 5,
-                        "colors": [(0, 10, 0), "green"],
-                    }
-                },
-                "Cylon": {
-                    "cylon_1": {
-                        "pattern": "cylon",
-                        "target": "0-14",
-                        "width": 4,
-                        "colors": ["black", "red"],
-                    }
-                },
-                "Dark": {"all_dark": {"pattern": "solid", "target": "all", "colors": ["black"]}},
-                "Flood": {
-                    "all_flood": {
-                        "pattern": "solid",
-                        "target": "all",
-                        "colors": ["white"],
-                        "filters": [{"filter": "sizzle", "frequency": 40, "variation": 30, "heat": 20}],
-                    }
-                },
-                "Engines": {
-                    "top": {
-                        "pattern": "wave",
-                        "target": "0-8",
-                        "frequency": 1.5,
-                        "number": 1,
-                        "width": 7,
-                        "colors": [(0, 50, 0), (0, 100, 0)],
-                        "reverse": True,
-                    },
-                    "bottom": {
-                        "pattern": "wave",
-                        "target": "9-17",
-                        "frequency": 1.5,
-                        "number": 1,
-                        "width": 7,
-                        "colors": [(0, 50, 0), (0, 100, 0)],
-                        "reverse": True,
-                    },
-                    "front": {"pattern": "solid", "target": 18, "colors": ["green"]},
-                    "fibers": {
-                        "pattern": "solid",
-                        "target": "19-30",
-                        "colors": ["white"],
-                    },
-                },
-                "Engines2": {
-                    "startup_1": {
-                        "target": "all",
-                        "pattern": "fade_in",
-                        "duration": 120,
-                        "colors": ["black", (50, 50, 50)],
-                    },
-                    # "startup_2": {
-                    #     "target": "all",
-                    #     "pattern": "fade_in",
-                    #     "duration": 120,
-                    #     "colors": [(50, 50, 50), (0, 150, 0)],
-                    #     "initial": False,
-                    # },
-                },
-            },
-            "named_ranges": {},
-        }
+        # self.settings_object["lighting_settings"] = {
+        #     "default_scene": "Engines",
+        #     "scenes": {
+        #         "Test Scene": {
+        #             "blink_1": {"target": 0, "pattern": "blink", "frequency": 2, "colors": ["white", "black"]},
+        #             "blink_2": {"target": "1-3", "pattern": "blink", "frequency": 1, "colors": ["red", "blue"]},
+        #             "pulse_1": {
+        #                 "target": 4,
+        #                 "pattern": "pulse",
+        #                 "frequency": 1.3,
+        #                 "duration": 1,
+        #                 "colors": ["white", "black"],
+        #             },
+        #             "fade_in_1": {
+        #                 "target": 5,
+        #                 "pattern": "fade_in",
+        #                 "duration": 120,
+        #                 "colors": ["red", "blue"],
+        #             },
+        #             "solid_1": {"pattern": "solid", "target": 6, "colors": ["purple"]},
+        #             "breath_1": {
+        #                 "target": [7, 8, 10],
+        #                 "pattern": "breathe",
+        #                 "frequency": 0.5,
+        #                 "colors": ["red", "blue"],
+        #             },
+        #         },
+        #         "Wave": {
+        #             "wave_1": {
+        #                 "pattern": "wave",
+        #                 "target": "0-14",
+        #                 "frequency": 1,
+        #                 "number": 2,
+        #                 "width": 5,
+        #                 "colors": [(0, 10, 0), "green"],
+        #             }
+        #         },
+        #         "Cylon": {
+        #             "cylon_1": {
+        #                 "pattern": "cylon",
+        #                 "target": "0-14",
+        #                 "width": 4,
+        #                 "colors": ["black", "red"],
+        #             }
+        #         },
+        #         "Dark": {"all_dark": {"pattern": "solid", "target": "all", "colors": ["black"]}},
+        #         "Flood": {
+        #             "all_flood": {
+        #                 "pattern": "solid",
+        #                 "target": "all",
+        #                 "colors": ["white"],
+        #                 "filters": [{"filter": "sizzle", "frequency": 40, "variation": 30, "heat": 20}],
+        #             }
+        #         },
+        #         "Engines": {
+        #             "top": {
+        #                 "pattern": "wave",
+        #                 "target": "0-8",
+        #                 "frequency": 1.5,
+        #                 "number": 1,
+        #                 "width": 7,
+        #                 "colors": [(0, 50, 0), (0, 100, 0)],
+        #                 "reverse": True,
+        #             },
+        #             "bottom": {
+        #                 "pattern": "wave",
+        #                 "target": "9-17",
+        #                 "frequency": 1.5,
+        #                 "number": 1,
+        #                 "width": 7,
+        #                 "colors": [(0, 50, 0), (0, 100, 0)],
+        #                 "reverse": True,
+        #             },
+        #             "front": {"pattern": "solid", "target": 18, "colors": ["green"]},
+        #             "fibers": {
+        #                 "pattern": "solid",
+        #                 "target": "19-30",
+        #                 "colors": ["white"],
+        #             },
+        #         },
+        #         "Engines2": {
+        #             "startup_1": {
+        #                 "target": "all",
+        #                 "pattern": "fade_in",
+        #                 "duration": 120,
+        #                 "colors": ["black", (50, 50, 50)],
+        #             },
+        #             # "startup_2": {
+        #             #     "target": "all",
+        #             #     "pattern": "fade_in",
+        #             #     "duration": 120,
+        #             #     "colors": [(50, 50, 50), (0, 150, 0)],
+        #             #     "initial": False,
+        #             # },
+        #         },
+        #     },
+        #     "named_ranges": {},
+        # }
 
-        self.settings_object.store()
+        # self.settings_object.store()
 
         self.settings = self.settings_object["lighting_settings"]
 
