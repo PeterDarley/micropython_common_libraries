@@ -104,12 +104,21 @@ def _evaluate_condition(expression, context):
     Supports:
     - Simple variables: ``variable``, ``variable.key``, ``variable.0``
     - Equality comparisons: ``variable == value`` or ``variable == variable2``
+    - Inequality comparisons: ``variable != value`` or ``variable != variable2``
 
     Returns True if the condition is truthy, False otherwise.
     Falsy values: empty string, '0', 'False', 'None'.
     """
 
     expression = expression.strip()
+
+    # Check for != operator (must check before == to avoid false split on !==)
+    if "!=" in expression:
+        parts = expression.split("!=", 1)
+        if len(parts) == 2:
+            left = _resolve_variable(parts[0].strip(), context)
+            right = _resolve_variable(parts[1].strip(), context)
+            return left != right
 
     # Check for == operator
     if "==" in expression:
@@ -160,6 +169,7 @@ def _process_if_blocks(text, context):
     - ``{% if variable %}`` — true if truthy (non-empty, not '0', 'False', 'None')
     - ``{% if variable.key }}`` — dot-notation access
     - ``{% if variable == value }}`` — equality check (variable can use dot-notation)
+    - ``{% if variable != value }}`` — inequality check (variable can use dot-notation)
     - ``{% else %}`` blocks are also supported
 
     Nested ``{% if %}`` blocks are handled correctly via depth tracking.
