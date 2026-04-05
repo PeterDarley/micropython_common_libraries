@@ -7,42 +7,7 @@ from animation import Animation
 from leds import LEDs
 from storage import PersistentDict
 
-colors = {
-    # Neutrals
-    "white": (255, 255, 255),
-    "warm_white": (255, 220, 160),
-    "cool_white": (180, 210, 255),
-    "dim_white": (64, 64, 64),
-    "silver": (180, 180, 200),
-    "grey": (128, 128, 128),
-    "black": (0, 0, 0),
-    # Reds / oranges
-    "red": (255, 0, 0),
-    "dark_red": (128, 0, 0),
-    "orange": (255, 100, 0),
-    "amber": (255, 160, 0),
-    "gold": (255, 200, 0),
-    "yellow": (255, 255, 0),
-    # Greens
-    "green": (0, 255, 0),
-    "dark_green": (0, 128, 0),
-    "lime": (128, 255, 0),
-    "teal": (0, 180, 128),
-    # Blues / purples
-    "cyan": (0, 255, 255),
-    "ice_blue": (80, 160, 255),
-    "blue": (0, 0, 255),
-    "dark_blue": (0, 0, 128),
-    "indigo": (60, 0, 180),
-    "violet": (180, 0, 255),
-    "purple": (128, 0, 128),
-    "magenta": (255, 0, 255),
-    "pink": (255, 80, 150),
-    # Specialty / model
-    "fire": (255, 40, 0),
-    "plasma": (0, 200, 255),
-    "engine_glow": (100, 40, 255),
-}
+from lighting.colors import colors
 
 
 class Lighting:
@@ -99,7 +64,7 @@ class Lighting:
         #                 "pattern": "solid",
         #                 "target": "all",
         #                 "colors": ["white"],
-        #                 "filters": [{"filter": "sizzle", "frequency": 40, "variation": 30, "heat": 20}],
+        #                 "filters": [{"filter": "scintillate", "frequency": 40, "variation": 30, "heat": 20}],
         #             }
         #         },
         #         "Engines": {
@@ -109,7 +74,7 @@ class Lighting:
         #                 "frequency": 1.5,
         #                 "number": 1,
         #                 "width": 7,
-        #                 "colors": [(0, 50, 0), (0, 100, 0)],
+        #                 "colors": [(0, 50, 0), (0, 200, 0)],
         #                 "reverse": True,
         #             },
         #             "bottom": {
@@ -537,12 +502,20 @@ class Lighting:
         return position
 
     def _render_wave(
-        self, targets: list, head_positions: list, width: int, ticks_per_led: float, color1: tuple, color2: tuple
+        self,
+        targets: list,
+        head_positions: list,
+        width: int,
+        ticks_per_led: float,
+        color1: tuple,
+        color2: tuple,
+        reverse: bool = False,
     ) -> list:
         """Render one or more wave comets with sub-pixel smoothing and return (led_index, color) pairs.
 
         Head positions can be fractional for smooth animation. Colors are interpolated
-        across adjacent LEDs at the head boundary.
+        across adjacent LEDs at the head boundary. If reverse=True, the tail extends
+        forward (higher indices) instead of backward.
         """
 
         fade_ticks = max(1, width * ticks_per_led)
@@ -579,22 +552,40 @@ class Lighting:
 
         # Phase 2: place head at full brightness and blend the transition smoothly.
         for head_position in head_positions:
-            head_index = int(head_position)
-            sub_position = head_position - head_index  # 0.0 to 1.0
+            if not reverse:
+                # Forward: head_index is floor(position), sub_position is fractional part
+                head_index = int(head_position)
+                sub_position = head_position - head_index  # 0.0 to 1.0
+            else:
+                # Reverse: head_index is ceil(position), sub_position is distance from ceil
+                # This ensures smooth blending as position decreases
+                head_index = math.ceil(head_position)
+                sub_position = head_index - head_position  # 0.0 to 1.0
 
-            if head_index < len(targets):
+            if 0 <= head_index < len(targets):
                 # Head LED always at full color2 brightness for visibility
                 updates[head_index] = (targets[head_index], color2)
 
                 # Smooth transition: blend into the next LED for sub-pixel smoothing
-                if head_index + 1 < len(targets) and sub_position > 0:
-                    # Next LED is partially still head (at sub_position strength)
-                    blend_color = (
-                        int(color2[0] * sub_position + color1[0] * (1 - sub_position)),
-                        int(color2[1] * sub_position + color1[1] * (1 - sub_position)),
-                        int(color2[2] * sub_position + color1[2] * (1 - sub_position)),
-                    )
-                    updates[head_index + 1] = (targets[head_index + 1], blend_color)
+                # Direction depends on reverse flag
+                if not reverse:
+                    # Forward: tail extends forward (higher indices)
+                    if head_index + 1 < len(targets) and sub_position > 0:
+                        blend_color = (
+                            int(color2[0] * sub_position + color1[0] * (1 - sub_position)),
+                            int(color2[1] * sub_position + color1[1] * (1 - sub_position)),
+                            int(color2[2] * sub_position + color1[2] * (1 - sub_position)),
+                        )
+                        updates[head_index + 1] = (targets[head_index + 1], blend_color)
+                else:
+                    # Reverse: tail extends backward (lower indices)
+                    if head_index - 1 >= 0 and sub_position > 0:
+                        blend_color = (
+                            int(color2[0] * sub_position + color1[0] * (1 - sub_position)),
+                            int(color2[1] * sub_position + color1[1] * (1 - sub_position)),
+                            int(color2[2] * sub_position + color1[2] * (1 - sub_position)),
+                        )
+                        updates[head_index - 1] = (targets[head_index - 1], blend_color)
 
         return list(updates.values())
 
@@ -623,7 +614,9 @@ class Lighting:
             for peak in range(number)
         ]
 
-        return self._render_wave(targets, head_positions, width, ticks_per_led, job_colors[0], job_colors[1])
+        return self._render_wave(
+            targets, head_positions, width, ticks_per_led, job_colors[0], job_colors[1], reverse=reverse
+        )
 
     def pattern_cylon(self, name, job, tick_number) -> list:
         """Cylon function: a comet that bounces back and forth across the LEDs.
@@ -645,7 +638,11 @@ class Lighting:
 
         if phase < one_way_ticks:
             head_position = self._wave_head_position(num_leds, one_way_ticks, phase, reverse=False)
-            return self._render_wave(targets, [head_position], width, ticks_per_led, job_colors[0], job_colors[1])
+            return self._render_wave(
+                targets, [head_position], width, ticks_per_led, job_colors[0], job_colors[1], reverse=False
+            )
         else:
             head_position = self._wave_head_position(num_leds, one_way_ticks, phase - one_way_ticks, reverse=True)
-            return self._render_wave(targets, [head_position], width, ticks_per_led, job_colors[0], job_colors[1])
+            return self._render_wave(
+                targets, [head_position], width, ticks_per_led, job_colors[0], job_colors[1], reverse=True
+            )
