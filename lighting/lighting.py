@@ -11,8 +11,19 @@ from lighting.colors import colors
 
 
 class Lighting:
+    """Main lighting controller class."""
+
+    def __new__(cls, *args, **kwargs):
+        """Implement singleton pattern: return existing instance if it exists."""
+
+        if not hasattr(cls, "_instance"):
+            cls._instance = super().__new__(cls)
+
+        return cls._instance
+
     def __init__(self):
         self.settings_object = PersistentDict()
+
         # self.settings_object["lighting_settings"] = {
         #     "default_scene": "Engines",
         #     "scenes": {
@@ -118,12 +129,18 @@ class Lighting:
 
         self.scene_name = None
         self.retained_values = {}
+        self.target_colors = []  # Cache of current target colors for each LED, used by filters like sizzle
         # self.active_jobs = {}
 
         self.set_scene()
         self.leds = LEDs()
 
         self.animation = Animation(jobs={"lighting": self.process_tick}, stop_callbacks={"lighting": self.stop})
+
+    def add_colors(self, new_colors: dict[str, tuple[int, int, int]]):
+        """Add new named colors to the lighting system."""
+
+        colors.update(new_colors)
 
     def set_scene(self, scene_name: str = None):
         """Set the current lighting scene."""
@@ -132,7 +149,7 @@ class Lighting:
         if current_scene is not None and current_scene == scene_name:
             return
 
-        scenes = self.settings_object["lighting_settings"]["scenes"]
+        scenes: dict = self.settings_object["lighting_settings"]["scenes"]
 
         if scene_name is None:
             if "default_scene" in self.settings_object["lighting_settings"]:
@@ -173,19 +190,20 @@ class Lighting:
             if hasattr(self, pattern_name):
                 func = getattr(self, pattern_name)
                 result = func(name=name, job=job, tick_number=tick_number)
+                self.target_colors = result  # Cache current target colors for filters to access
 
                 # Apply filters if present.
                 if "filters" in job:
                     # If no result from the pattern, build one from targets with current colors.
-                    if not result:
-                        targets = self.get_targets(job["target"])
-                        result = [(target, self.leds.get(target)) for target in targets]
+                    # if not result:
+                    #     targets = self.get_targets(job["target"])
+                    #     result = [(target, self.leds.get(target)) for target in targets]
 
                     for filter_dict in job["filters"]:
                         filter_name = "filter_" + filter_dict["filter"]
                         if hasattr(self, filter_name):
                             filter_func = getattr(self, filter_name)
-                            result = filter_func(filter_dict, result, tick_number=tick_number)
+                            result = filter_func(filter_dict, self.target_colors, tick_number=tick_number)
 
                 if result:
                     for led_index, color in result:
@@ -369,13 +387,13 @@ class Lighting:
 
         return result
 
-    def pattern_solid(self, name, job, tick_number) -> list:
+    def pattern_solid(self, name: str, job: dict, tick_number: int) -> list:
         """Simple solid color function for a lighting job."""
 
         job_colors = self.get_color(job["colors"])
         return self._set_targets(self.get_targets(job["target"]), job_colors[0])
 
-    def pattern_blink(self, name, job, tick_number) -> list:
+    def pattern_blink(self, name: str, job: dict, tick_number: int) -> list:
         """Simple blink function for a lighting job."""
 
         interval = 40 // job.get("frequency", None)

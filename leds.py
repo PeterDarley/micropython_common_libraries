@@ -73,7 +73,7 @@ class LEDs:
             pin = Pin(pin)
 
         self.count = int(count)
-        self._np = neopixel.NeoPixel(pin, self.count)
+        self._neopixels = neopixel.NeoPixel(pin, self.count)
         self._brightness = 1.0
         self.brightness = brightness
         self._initialised = True
@@ -99,25 +99,27 @@ class LEDs:
             indexes = list(range(start, end + 1))
 
         for index in indexes:
-            self._np[index] = self._scale(color)
+            self._neopixels[index] = self._scale(color)
 
     def get(self, index: int) -> tuple:
         """Return the raw value currently staged for pixel `index` (after brightness scaling)."""
+
         if index < 0 or index >= self.count:
             return (0, 0, 0)
-        return tuple(self._np[index])
+
+        return tuple(self._neopixels[index])
 
     def fill(self, color: tuple) -> None:
         """Fill the entire strip with `color` (r,g,b)."""
         scaled = self._scale(color)
         for i in range(self.count):
-            self._np[i] = scaled
+            self._neopixels[i] = scaled
 
     def range(self, start: int, end: int, color: tuple) -> None:
         """Set pixels from `start` to `end` (exclusive) to `color` (r,g,b)."""
         scaled = self._scale(color)
         for i in range(max(0, start), min(self.count, end)):
-            self._np[i] = scaled
+            self._neopixels[i] = scaled
 
     def identify(self, indexes: list | int) -> None:
         """Turn the given LED indexes white and all others black."""
@@ -130,7 +132,7 @@ class LEDs:
         black = (0, 0, 0)
 
         for i in range(self.count):
-            self._np[i] = white if i in target_set else black
+            self._neopixels[i] = white if i in target_set else black
 
         self.show()
 
@@ -141,7 +143,7 @@ class LEDs:
     def show(self) -> None:
         """Push the currently staged colors to the LEDs."""
         try:
-            self._np.write()
+            self._neopixels.write()
         except Exception:
             # some ports raise on consecutive writes in bad states; ignore
             pass
