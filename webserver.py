@@ -298,11 +298,16 @@ def render_template(template_file, context=None, templates_dir="templates"):
         # Extract for tag content
         for_tag = text[start + 2 : for_start].strip()
 
-        # Parse: for var in list_name
-        parts = for_tag.split()
-        if len(parts) >= 4 and parts[0] == "for" and parts[2] == "in":
-            var_name = parts[1]
-            list_name = parts[3]
+        # Parse: for var in list_name or for var1, var2 in list_name
+        # Find the " in " keyword to split var names from list name
+        in_pos = for_tag.find(" in ")
+        if in_pos != -1 and for_tag.startswith("for "):
+            var_names_str = for_tag[4:in_pos].strip()  # Everything between "for " and " in "
+            list_name = for_tag[in_pos + 4 :].strip()  # Everything after " in "
+
+            # Handle tuple unpacking (e.g., "color_name, color_value" -> ["color_name", "color_value"])
+            var_names = [v.strip() for v in var_names_str.split(",")]
+            is_tuple_unpack = len(var_names) > 1
 
             # Find matching endfor by tracking nesting depth
             depth = 1
@@ -348,7 +353,28 @@ def render_template(template_file, context=None, templates_dir="templates"):
                     # Render loop body for each item
                     for item in items:
                         loop_context = dict(context)
-                        loop_context[var_name] = item
+
+                        # Handle tuple unpacking
+                        if is_tuple_unpack:
+                            # Try to unpack item into multiple variables
+                            try:
+                                if isinstance(item, (tuple, list)):
+                                    for i, var_name in enumerate(var_names):
+                                        loop_context[var_name] = item[i] if i < len(item) else ""
+                                else:
+                                    # If item is not a tuple/list, assign to first var and empty string to rest
+                                    loop_context[var_names[0]] = item
+                                    for var_name in var_names[1:]:
+                                        loop_context[var_name] = ""
+                            except (TypeError, IndexError):
+                                # Fallback: assign item to first variable
+                                loop_context[var_names[0]] = item
+                                for var_name in var_names[1:]:
+                                    loop_context[var_name] = ""
+                        else:
+                            # Single variable assignment
+                            loop_context[var_names[0]] = item
+
                         loop_text = _process_if_blocks(loop_body, loop_context)
                         loop_text = _process_includes(loop_text, loop_context, templates_dir)
                         rendered_chunks.append(_apply_context(loop_text, loop_context))
