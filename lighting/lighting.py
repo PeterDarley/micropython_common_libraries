@@ -297,9 +297,23 @@ class Lighting:
             print(f"lighting: leds.show() failed: {e}")
 
     def get_color(self, input: str | tuple | list) -> tuple[int, int, int]:
-        """Make sure that we have an RGB tuple"""
+        """Resolve a color input to an RGB tuple.
+
+        Accepts:
+        - ``"name"`` — a standard named color from the colors dict
+        - ``"custom:name"`` — a custom color stored in settings
+        - ``(r, g, b)`` tuple or list — returned as-is (list wrapped in a list)
+        """
 
         if isinstance(input, str):
+            if input.startswith("custom:"):
+                color_name = input[7:]
+                custom_colors = self.settings.get("custom_colors", {})
+                if color_name in custom_colors:
+                    rgb = custom_colors[color_name]
+                    return (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+                return (255, 255, 255)
+
             return colors.get(input, (255, 255, 255))
 
         elif isinstance(input, list):
