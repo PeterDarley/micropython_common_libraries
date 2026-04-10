@@ -308,7 +308,15 @@ class Lighting:
         return input
 
     def get_targets(self, target) -> list[int]:
-        """Return a list of target indices for the given target specification."""
+        """Return a list of target indices for the given target specification.
+
+        Supports:
+        - int: single LED index
+        - list: list of indices
+        - "0-14": range notation (inclusive)
+        - "all": all LEDs
+        - "named:range_name": look up range in named_ranges
+        """
 
         if isinstance(target, int):
             return [target]
@@ -316,12 +324,25 @@ class Lighting:
         elif isinstance(target, list):
             return target
 
-        elif isinstance(target, str) and "-" in target:
-            start, end = map(int, target.split("-"))
-            return list(range(start, end + 1))
+        elif isinstance(target, str):
+            # Check for named range reference
+            if target.startswith("named:"):
+                range_name = target[6:]  # Strip "named:" prefix
+                named_ranges = self.settings.get("named_ranges", {})
+                if range_name in named_ranges:
+                    named_target = named_ranges[range_name]
+                    # Recursively resolve the named target (could be a range, list, or "all")
+                    return self.get_targets(named_target)
+                return []
 
-        elif target == "all":
-            return list(range(self.leds.count))
+            # Check for range notation (e.g., "0-14")
+            elif "-" in target:
+                start, end = map(int, target.split("-"))
+                return list(range(start, end + 1))
+
+            # Check for "all"
+            elif target == "all":
+                return list(range(self.leds.count))
 
         return []
 
