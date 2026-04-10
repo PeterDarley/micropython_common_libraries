@@ -10,6 +10,75 @@ from storage import PersistentDict
 from lighting.colors import colors
 
 
+# Pattern metadata: defines required and optional parameters for each pattern
+PATTERN_METADATA: dict = {
+    "solid": {
+        "description": "Solid color",
+        "required": ["target", "colors"],
+        "optional": [],
+        "color_count": 1,
+    },
+    "blink": {
+        "description": "Blinking color",
+        "required": ["target", "colors"],
+        "optional": ["frequency"],
+        "color_count": 2,
+    },
+    "pulse": {
+        "description": "Pulsing color",
+        "required": ["target", "colors", "duration"],
+        "optional": ["frequency"],
+        "color_count": 2,
+    },
+    "fade_in": {
+        "description": "Fade between two colors",
+        "required": ["target", "colors", "duration"],
+        "optional": [],
+        "color_count": 2,
+    },
+    "breathe": {
+        "description": "Breathing effect",
+        "required": ["target", "colors"],
+        "optional": ["frequency"],
+        "color_count": 2,
+    },
+    "wave": {
+        "description": "Moving wave effect",
+        "required": ["target", "colors"],
+        "optional": ["frequency", "number", "width", "reverse"],
+        "color_count": 2,
+    },
+    "cylon": {
+        "description": "Cylon bouncing effect",
+        "required": ["target", "colors"],
+        "optional": ["frequency", "width"],
+        "color_count": 2,
+    },
+    "sizzle": {
+        "description": "Sizzle/twinkle effect",
+        "required": ["target", "colors"],
+        "optional": ["frequency", "variation", "heat"],
+        "color_count": 1,
+    },
+}
+
+# Filter metadata: defines optional parameters for each filter
+FILTER_METADATA: dict = {
+    "null": {
+        "description": "No filter",
+        "optional": [],
+    },
+    "sizzle": {
+        "description": "Sizzle filter",
+        "optional": ["frequency", "variation", "heat"],
+    },
+    "scintillate": {
+        "description": "Scintillate filter",
+        "optional": ["frequency", "variation", "heat"],
+    },
+}
+
+
 class Lighting:
     """Main lighting controller class."""
 
@@ -136,6 +205,16 @@ class Lighting:
         self.leds = LEDs()
 
         self.animation = Animation(jobs={"lighting": self.process_tick}, stop_callbacks={"lighting": self.stop})
+
+    def get_pattern_metadata(self) -> dict:
+        """Return metadata about all available patterns."""
+
+        return PATTERN_METADATA
+
+    def get_filter_metadata(self) -> dict:
+        """Return metadata about all available filters."""
+
+        return FILTER_METADATA
 
     def add_colors(self, new_colors: dict[str, tuple[int, int, int]]):
         """Add new named colors to the lighting system."""

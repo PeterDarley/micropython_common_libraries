@@ -90,7 +90,16 @@ def _resolve_variable(expression, context):
         elif isinstance(value, (list, tuple)):
             try:
                 value = value[int(part)]
-            except (ValueError, IndexError):
+            except ValueError:
+                # Part is not a literal integer; try resolving it as a context variable
+                if part in context:
+                    try:
+                        value = value[int(context[part])]
+                    except (ValueError, TypeError, IndexError):
+                        return ""
+                else:
+                    return ""
+            except IndexError:
                 return ""
         else:
             return ""
@@ -254,11 +263,153 @@ def _process_if_blocks(text, context):
     return text
 
 
+def _process_for_loops(text, context, templates_dir):
+    """Process ``{% for var in list %}...{% endfor %}`` blocks recursively.
+
+    Handles nested for loops by recursively processing the loop body before
+    applying variable substitution, preventing inner loop variables from being
+    erased by the outer loop's context application.
+    """
+
+    while "{% for" in text:
+        start = text.find("{% for")
+        if start == -1:
+            break
+
+        # Find the matching endfor
+        for_start = text.find("%}", start)
+        if for_start == -1:
+            break
+
+        # Extract for tag content
+        for_tag = text[start + 2 : for_start].strip()
+
+        # Parse: for var in list_name or for var1, var2 in list_name
+        in_pos = for_tag.find(" in ")
+        if in_pos != -1 and for_tag.startswith("for "):
+            var_names_str = for_tag[4:in_pos].strip()
+            list_name = for_tag[in_pos + 4 :].strip()
+
+            var_names = [v.strip() for v in var_names_str.split(",")]
+            is_tuple_unpack = len(var_names) > 1
+
+            # Find matching endfor by tracking nesting depth
+            depth = 1
+            search_pos = for_start + 2
+            endfor_start = -1
+
+            while depth > 0 and search_pos < len(text):
+                next_for = text.find("{% for", search_pos)
+                next_endfor = text.find("{% endfor %}", search_pos)
+
+                if next_for != -1 and (next_endfor == -1 or next_for < next_endfor):
+                    depth += 1
+                    search_pos = next_for + 6
+                elif next_endfor != -1:
+                    depth -= 1
+                    if depth == 0:
+                        endfor_start = next_endfor
+                    search_pos = next_endfor + 12
+                else:
+                    break
+
+            if endfor_start == -1:
+                text = text[:start] + text[for_start + 2 :]
+                continue
+
+            loop_body = text[for_start + 2 : endfor_start]
+
+            # Resolve the iterable from context
+            items = None
+            if list_name.endswith(".items()"):
+                dict_name = list_name[:-8].strip()
+                if dict_name in context:
+                    dict_obj = context[dict_name]
+                    if isinstance(dict_obj, dict):
+                        items = list(dict_obj.items())
+            elif list_name.endswith(".keys()"):
+                dict_name = list_name[:-7].strip()
+                if dict_name in context:
+                    dict_obj = context[dict_name]
+                    if isinstance(dict_obj, dict):
+                        items = list(dict_obj.keys())
+            elif list_name.endswith(".values()"):
+                dict_name = list_name[:-9].strip()
+                if dict_name in context:
+                    dict_obj = context[dict_name]
+                    if isinstance(dict_obj, dict):
+                        items = list(dict_obj.values())
+            elif list_name.startswith("range(") and list_name.endswith(")"):
+                range_arg = list_name[6:-1].strip()
+                try:
+                    items = list(range(int(range_arg)))
+                except ValueError:
+                    if range_arg in context:
+                        try:
+                            items = list(range(int(context[range_arg])))
+                        except (ValueError, TypeError):
+                            items = []
+            else:
+                if list_name in context:
+                    items = context[list_name]
+
+            if items is not None:
+                rendered_chunks = []
+
+                try:
+                    if not isinstance(items, (list, tuple)):
+                        items = [items]
+
+                    for item in items:
+                        loop_context = dict(context)
+
+                        if is_tuple_unpack:
+                            try:
+                                if isinstance(item, (tuple, list)):
+                                    for i, var_name in enumerate(var_names):
+                                        loop_context[var_name] = item[i] if i < len(item) else ""
+                                else:
+                                    loop_context[var_names[0]] = item
+                                    for var_name in var_names[1:]:
+                                        loop_context[var_name] = ""
+                            except (TypeError, IndexError):
+                                loop_context[var_names[0]] = item
+                                for var_name in var_names[1:]:
+                                    loop_context[var_name] = ""
+                        else:
+                            loop_context[var_names[0]] = item
+
+                        # Recursively process nested for loops before applying context
+                        loop_text = _process_for_loops(loop_body, loop_context, templates_dir)
+                        loop_text = _process_if_blocks(loop_text, loop_context)
+                        loop_text = _process_includes(loop_text, loop_context, templates_dir)
+                        rendered_chunks.append(_apply_context(loop_text, loop_context))
+                        del loop_context, loop_text
+                        import gc
+
+                        gc.collect()
+
+                    rendered_loop = "".join(rendered_chunks)
+                    text = text[:start] + rendered_loop + text[endfor_start + 12 :]
+
+                except Exception:
+                    text = text[:start] + text[endfor_start + 12 :]
+            else:
+                text = text[:start] + text[endfor_start + 12 :]
+        else:
+            text = text[:start] + text[for_start + 2 :]
+
+    return text
+
+
 def render_template(template_file, context=None, templates_dir="templates"):
     """Load a template file and substitute ``{{ key }}`` placeholders.
 
     Also supports ``{% include 'filename' %}`` to include other templates
-    with the same context, ``{% for var in list %}...{% endfor %}`` loops,
+    with the same context, ``{% for var in list %}...{% endfor %}`` loops
+    (including ``{% for key, value in dict.items() %}``, ``{% for key in dict.keys() %}``,
+    ``{% for value in dict.values() %}``, and ``{% for i in range(n) %}`` where *n* is
+    an integer literal or a context variable),
     ``{% if expression %}...{% endif %}`` conditionals (including == comparisons),
     and dot-notation for dicts/lists (e.g. ``{{ item.key }}``, ``{{ item.0 }}``).
 
@@ -284,120 +435,8 @@ def render_template(template_file, context=None, templates_dir="templates"):
 
     text = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
 
-    # Handle for loops: {% for var in list %}...{% endfor %}
-    while "{% for" in text:
-        start = text.find("{% for")
-        if start == -1:
-            break
-
-        # Find the matching endfor
-        for_start = text.find("%}", start)
-        if for_start == -1:
-            break
-
-        # Extract for tag content
-        for_tag = text[start + 2 : for_start].strip()
-
-        # Parse: for var in list_name or for var1, var2 in list_name
-        # Find the " in " keyword to split var names from list name
-        in_pos = for_tag.find(" in ")
-        if in_pos != -1 and for_tag.startswith("for "):
-            var_names_str = for_tag[4:in_pos].strip()  # Everything between "for " and " in "
-            list_name = for_tag[in_pos + 4 :].strip()  # Everything after " in "
-
-            # Handle tuple unpacking (e.g., "color_name, color_value" -> ["color_name", "color_value"])
-            var_names = [v.strip() for v in var_names_str.split(",")]
-            is_tuple_unpack = len(var_names) > 1
-
-            # Find matching endfor by tracking nesting depth
-            depth = 1
-            search_pos = for_start + 2
-            endfor_start = -1
-
-            while depth > 0 and search_pos < len(text):
-                next_for = text.find("{% for", search_pos)
-                next_endfor = text.find("{% endfor %}", search_pos)
-
-                # Determine which comes first
-                if next_for != -1 and (next_endfor == -1 or next_for < next_endfor):
-                    # Found another for loop first
-                    depth += 1
-                    search_pos = next_for + 6
-                elif next_endfor != -1:
-                    # Found an endfor
-                    depth -= 1
-                    if depth == 0:
-                        endfor_start = next_endfor
-                    search_pos = next_endfor + 12
-                else:
-                    # No more tags found
-                    break
-
-            if endfor_start == -1:
-                text = text[:start] + text[for_start + 2 :]
-                continue
-
-            # Extract loop body
-            loop_body = text[for_start + 2 : endfor_start]
-
-            # Get the list from context
-            if list_name in context:
-                items = context[list_name]
-                rendered_chunks = []
-
-                try:
-                    # Make items iterable
-                    if not isinstance(items, (list, tuple)):
-                        items = [items]
-
-                    # Render loop body for each item
-                    for item in items:
-                        loop_context = dict(context)
-
-                        # Handle tuple unpacking
-                        if is_tuple_unpack:
-                            # Try to unpack item into multiple variables
-                            try:
-                                if isinstance(item, (tuple, list)):
-                                    for i, var_name in enumerate(var_names):
-                                        loop_context[var_name] = item[i] if i < len(item) else ""
-                                else:
-                                    # If item is not a tuple/list, assign to first var and empty string to rest
-                                    loop_context[var_names[0]] = item
-                                    for var_name in var_names[1:]:
-                                        loop_context[var_name] = ""
-                            except (TypeError, IndexError):
-                                # Fallback: assign item to first variable
-                                loop_context[var_names[0]] = item
-                                for var_name in var_names[1:]:
-                                    loop_context[var_name] = ""
-                        else:
-                            # Single variable assignment
-                            loop_context[var_names[0]] = item
-
-                        loop_text = _process_if_blocks(loop_body, loop_context)
-                        loop_text = _process_includes(loop_text, loop_context, templates_dir)
-                        rendered_chunks.append(_apply_context(loop_text, loop_context))
-                        # Free memory after each iteration
-                        del loop_context, loop_text
-                        import gc
-
-                        gc.collect()
-
-                    # Join all chunks at the end
-                    rendered_loop = "".join(rendered_chunks)
-
-                    # Replace the entire for loop with rendered content
-                    text = text[:start] + rendered_loop + text[endfor_start + 12 :]
-                except Exception as e:
-                    # On error, remove the loop tag
-                    text = text[:start] + text[endfor_start + 12 :]
-            else:
-                # List not found, remove loop
-                text = text[:start] + text[endfor_start + 12 :]
-        else:
-            # Malformed for tag, skip it
-            text = text[:start] + text[for_start + 2 :]
+    # Handle for loops (including nested): {% for var in list %}...{% endfor %}
+    text = _process_for_loops(text, context, templates_dir)
 
     # Process {% if %}...{% endif %} conditionals.
     text = _process_if_blocks(text, context)
