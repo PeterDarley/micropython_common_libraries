@@ -298,7 +298,33 @@ def _resolve_iterable(list_name, context):
                     pass
             return []
 
-    return context.get(list_name)
+    return context.get(list_name) if "." not in list_name else _resolve_variable_raw(list_name, context)
+
+
+def _resolve_variable_raw(expression, context):
+    """Resolve a dot-notation path and return the raw Python object (not stringified).
+
+    Unlike ``_resolve_variable``, this returns the actual dict/list/tuple value
+    rather than converting it to a string.
+    """
+
+    parts = expression.strip().split(".")
+    value = context.get(parts[0])
+
+    for part in parts[1:]:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif isinstance(value, (list, tuple)):
+            try:
+                value = value[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+
+    return value
 
 
 def _process_for_loops(text, context, templates_dir):
