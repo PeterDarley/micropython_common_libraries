@@ -501,10 +501,28 @@ class Lighting:
 
         return result
 
+    def _get_effect_colors(self, effect: dict, count: int = 1) -> list:
+        """Return a list of resolved RGB tuples for the effect's colors.
+
+        Falls back to white/black if colors are missing or fewer than needed.
+        """
+
+        defaults = [(255, 255, 255), (0, 0, 0)]
+        raw = effect.get("colors", [])
+        resolved = self.get_color(raw) if raw else []
+
+        if not isinstance(resolved, list):
+            resolved = [resolved]
+
+        while len(resolved) < count:
+            resolved.append(defaults[len(resolved) % len(defaults)])
+
+        return resolved
+
     def pattern_solid(self, name: str, effect: dict, tick_number: int) -> list:
         """Simple solid color function for a lighting effect."""
 
-        effect_colors = self.get_color(effect["colors"])
+        effect_colors = self._get_effect_colors(effect, 1)
         return self._set_targets(self.get_targets(effect["target"]), effect_colors[0])
 
     def pattern_blink(self, name: str, effect: dict, tick_number: int) -> list:
@@ -512,7 +530,7 @@ class Lighting:
 
         interval = 40 // effect.get("frequency", None)
         duration = interval
-        colors = self.get_color(effect["colors"])
+        colors = self._get_effect_colors(effect, 2)
 
         return self.pattern_periodic(
             name=name,
@@ -528,7 +546,7 @@ class Lighting:
 
         duration = effect["duration"]
         interval = 40 // effect.get("frequency", None) - duration
-        colors = self.get_color(effect["colors"])
+        colors = self._get_effect_colors(effect, 2)
 
         return self.pattern_periodic(
             name=name,
@@ -551,7 +569,7 @@ class Lighting:
     def pattern_fade_in(self, name, effect, tick_number) -> list:
         """Simple fade in function for a lighting effect."""
 
-        effect_colors = self.get_color(effect["colors"])
+        effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
         phase = min(tick_number / effect["duration"], 1.0)
         return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
@@ -559,7 +577,7 @@ class Lighting:
     def pattern_breathe(self, name, effect, tick_number) -> list:
         """Breathe function: uses sin() to smoothly modulate between two colors."""
 
-        effect_colors = self.get_color(effect["colors"])
+        effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
         phase = (math.sin(2 * math.pi * effect.get("frequency", 1) * tick_number / 40) + 1) / 2
         return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
@@ -567,7 +585,7 @@ class Lighting:
     def pattern_sizzle(self, name, effect, tick_number) -> list:
         """Sizzle function: fluctuates around a base color with random variations."""
 
-        effect_colors = self.get_color(effect["colors"])
+        effect_colors = self._get_effect_colors(effect, 1)
         targets = self.get_targets(effect["target"])
         frequency = effect.get("frequency", 40)
         variation = effect.get("variation", 50)
@@ -728,7 +746,7 @@ class Lighting:
         Set effect["reverse"] to True to sweep from last to first.
         """
 
-        effect_colors = self.get_color(effect["colors"])
+        effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
         frequency = effect.get("frequency", 1)
         width = effect.get("width", 5)
@@ -757,7 +775,7 @@ class Lighting:
         then reverses and sweeps back, repeating continuously.
         """
 
-        effect_colors = self.get_color(effect["colors"])
+        effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
         frequency = effect.get("frequency", 1)
         width = effect.get("width", 5)
