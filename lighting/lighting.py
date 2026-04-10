@@ -199,7 +199,7 @@ class Lighting:
         self.scene_name = None
         self.retained_values = {}
         self.target_colors = []  # Cache of current target colors for each LED, used by filters like sizzle
-        # self.active_jobs = {}
+        # self.active_effects = {}
 
         self.set_scene()
         self.leds = LEDs()
@@ -242,9 +242,9 @@ class Lighting:
         else:
             self.scene_name = scene_name
 
-        # for name, job in self.settings["scenes"][self.scene_name].items():
-        #     if "initial" not in job or job["initial"]:
-        #         self.active_jobs[name] = {}
+        # for name, effect in self.settings["scenes"][self.scene_name].items():
+        #     if "initial" not in effect or effect["initial"]:
+        #         self.active_effects[name] = {}
 
         if hasattr(self, "animation"):
             self.leds.clear()
@@ -261,24 +261,24 @@ class Lighting:
 
         updates = {}
 
-        for name, job in self.settings["scenes"][self.scene_name].items():
-            # if name not in self.active_jobs:
+        for name, effect in self.settings["scenes"][self.scene_name].items():
+            # if name not in self.active_effects:
             #     continue
 
-            pattern_name = "pattern_" + job["pattern"]
+            pattern_name = "pattern_" + effect["pattern"]
             if hasattr(self, pattern_name):
                 func = getattr(self, pattern_name)
-                result = func(name=name, job=job, tick_number=tick_number)
+                result = func(name=name, effect=effect, tick_number=tick_number)
                 self.target_colors = result  # Cache current target colors for filters to access
 
                 # Apply filters if present.
-                if "filters" in job:
+                if "filters" in effect:
                     # If no result from the pattern, build one from targets with current colors.
                     # if not result:
-                    #     targets = self.get_targets(job["target"])
+                    #     targets = self.get_targets(effect["target"])
                     #     result = [(target, self.leds.get(target)) for target in targets]
 
-                    for filter_dict in job["filters"]:
+                    for filter_dict in effect["filters"]:
                         filter_name = "filter_" + filter_dict["filter"]
                         if hasattr(self, filter_name):
                             filter_func = getattr(self, filter_name)
@@ -487,18 +487,18 @@ class Lighting:
 
         return result
 
-    def pattern_solid(self, name: str, job: dict, tick_number: int) -> list:
-        """Simple solid color function for a lighting job."""
+    def pattern_solid(self, name: str, effect: dict, tick_number: int) -> list:
+        """Simple solid color function for a lighting effect."""
 
-        job_colors = self.get_color(job["colors"])
-        return self._set_targets(self.get_targets(job["target"]), job_colors[0])
+        effect_colors = self.get_color(effect["colors"])
+        return self._set_targets(self.get_targets(effect["target"]), effect_colors[0])
 
-    def pattern_blink(self, name: str, job: dict, tick_number: int) -> list:
-        """Simple blink function for a lighting job."""
+    def pattern_blink(self, name: str, effect: dict, tick_number: int) -> list:
+        """Simple blink function for a lighting effect."""
 
-        interval = 40 // job.get("frequency", None)
+        interval = 40 // effect.get("frequency", None)
         duration = interval
-        colors = self.get_color(job["colors"])
+        colors = self.get_color(effect["colors"])
 
         return self.pattern_periodic(
             name=name,
@@ -506,15 +506,15 @@ class Lighting:
             interval=interval,
             duration=duration,
             colors=colors,
-            targets=self.get_targets(job["target"]),
+            targets=self.get_targets(effect["target"]),
         )
 
-    def pattern_pulse(self, name, job, tick_number) -> list:
-        """Simple pulse function for a lighting job."""
+    def pattern_pulse(self, name, effect, tick_number) -> list:
+        """Simple pulse function for a lighting effect."""
 
-        duration = job["duration"]
-        interval = 40 // job.get("frequency", None) - duration
-        colors = self.get_color(job["colors"])
+        duration = effect["duration"]
+        interval = 40 // effect.get("frequency", None) - duration
+        colors = self.get_color(effect["colors"])
 
         return self.pattern_periodic(
             name=name,
@@ -522,11 +522,11 @@ class Lighting:
             interval=interval,
             duration=duration,
             colors=colors,
-            targets=self.get_targets(job["target"]),
+            targets=self.get_targets(effect["target"]),
         )
 
     def pattern_periodic(self, name, tick_number, interval, duration, colors, targets) -> list:
-        """Periodic on/off function for a lighting job."""
+        """Periodic on/off function for a lighting effect."""
 
         cycle_length = duration + interval
         phase = tick_number % cycle_length
@@ -534,34 +534,34 @@ class Lighting:
 
         return [(target, color) for target in targets]
 
-    def pattern_fade_in(self, name, job, tick_number) -> list:
-        """Simple fade in function for a lighting job."""
+    def pattern_fade_in(self, name, effect, tick_number) -> list:
+        """Simple fade in function for a lighting effect."""
 
-        job_colors = self.get_color(job["colors"])
-        targets = self.get_targets(job["target"])
-        phase = min(tick_number / job["duration"], 1.0)
-        return self._set_targets(targets, self._linear_color(job_colors[0], job_colors[1], phase))
+        effect_colors = self.get_color(effect["colors"])
+        targets = self.get_targets(effect["target"])
+        phase = min(tick_number / effect["duration"], 1.0)
+        return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
 
-    def pattern_breathe(self, name, job, tick_number) -> list:
+    def pattern_breathe(self, name, effect, tick_number) -> list:
         """Breathe function: uses sin() to smoothly modulate between two colors."""
 
-        job_colors = self.get_color(job["colors"])
-        targets = self.get_targets(job["target"])
-        phase = (math.sin(2 * math.pi * job.get("frequency", 1) * tick_number / 40) + 1) / 2
-        return self._set_targets(targets, self._linear_color(job_colors[0], job_colors[1], phase))
+        effect_colors = self.get_color(effect["colors"])
+        targets = self.get_targets(effect["target"])
+        phase = (math.sin(2 * math.pi * effect.get("frequency", 1) * tick_number / 40) + 1) / 2
+        return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
 
-    def pattern_sizzle(self, name, job, tick_number) -> list:
+    def pattern_sizzle(self, name, effect, tick_number) -> list:
         """Sizzle function: fluctuates around a base color with random variations."""
 
-        job_colors = self.get_color(job["colors"])
-        targets = self.get_targets(job["target"])
-        frequency = job.get("frequency", 40)
-        variation = job.get("variation", 50)
-        heat = job.get("heat", 10)
+        effect_colors = self.get_color(effect["colors"])
+        targets = self.get_targets(effect["target"])
+        frequency = effect.get("frequency", 40)
+        variation = effect.get("variation", 50)
+        heat = effect.get("heat", 10)
 
         interval = 40 // frequency
 
-        (red, green, blue) = job_colors[0]
+        (red, green, blue) = effect_colors[0]
         (current_red, current_green, current_blue) = self.leds.get(targets[0])
 
         if tick_number == 1:
@@ -707,19 +707,19 @@ class Lighting:
 
         return list(updates.values())
 
-    def pattern_wave(self, name, job, tick_number):
+    def pattern_wave(self, name, effect, tick_number):
         """Wave function: creates one or more moving comet effects across the LEDs.
 
-        job["number"] controls how many evenly-spaced peaks travel simultaneously.
-        Set job["reverse"] to True to sweep from last to first.
+        effect["number"] controls how many evenly-spaced peaks travel simultaneously.
+        Set effect["reverse"] to True to sweep from last to first.
         """
 
-        job_colors = self.get_color(job["colors"])
-        targets = self.get_targets(job["target"])
-        frequency = job.get("frequency", 1)
-        width = job.get("width", 5)
-        reverse = job.get("reverse", False)
-        number = job.get("number", 1)
+        effect_colors = self.get_color(effect["colors"])
+        targets = self.get_targets(effect["target"])
+        frequency = effect.get("frequency", 1)
+        width = effect.get("width", 5)
+        reverse = effect.get("reverse", False)
+        number = effect.get("number", 1)
 
         num_leds = len(targets)
         cycle_ticks = max(1, 40 // frequency)
@@ -733,20 +733,20 @@ class Lighting:
         ]
 
         return self._render_wave(
-            targets, head_positions, width, ticks_per_led, job_colors[0], job_colors[1], reverse=reverse
+            targets, head_positions, width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=reverse
         )
 
-    def pattern_cylon(self, name, job, tick_number) -> list:
+    def pattern_cylon(self, name, effect, tick_number) -> list:
         """Cylon function: a comet that bounces back and forth across the LEDs.
 
         The head sweeps from the first target to the last over 40/frequency ticks,
         then reverses and sweeps back, repeating continuously.
         """
 
-        job_colors = self.get_color(job["colors"])
-        targets = self.get_targets(job["target"])
-        frequency = job.get("frequency", 1)
-        width = job.get("width", 5)
+        effect_colors = self.get_color(effect["colors"])
+        targets = self.get_targets(effect["target"])
+        frequency = effect.get("frequency", 1)
+        width = effect.get("width", 5)
 
         num_leds = len(targets)
         one_way_ticks = max(1, 40 // frequency)
@@ -757,10 +757,10 @@ class Lighting:
         if phase < one_way_ticks:
             head_position = self._wave_head_position(num_leds, one_way_ticks, phase, reverse=False)
             return self._render_wave(
-                targets, [head_position], width, ticks_per_led, job_colors[0], job_colors[1], reverse=False
+                targets, [head_position], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=False
             )
         else:
             head_position = self._wave_head_position(num_leds, one_way_ticks, phase - one_way_ticks, reverse=True)
             return self._render_wave(
-                targets, [head_position], width, ticks_per_led, job_colors[0], job_colors[1], reverse=True
+                targets, [head_position], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=True
             )
