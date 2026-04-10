@@ -263,6 +263,36 @@ def _process_if_blocks(text, context):
     return text
 
 
+def _resolve_iterable(list_name, context):
+    """Resolve a for-loop iterable expression to a list of items.
+
+    Supports dict.items()/keys()/values(), range(n), and plain variables.
+    Returns None if the iterable cannot be resolved.
+    """
+
+    for suffix, method in ((".items()", "items"), (".keys()", "keys"), (".values()", "values")):
+        if list_name.endswith(suffix):
+            dict_name = list_name[: -len(suffix)].strip()
+            dict_obj = context.get(dict_name)
+            if isinstance(dict_obj, dict):
+                return list(getattr(dict_obj, method)())
+            return None
+
+    if list_name.startswith("range(") and list_name.endswith(")"):
+        range_arg = list_name[6:-1].strip()
+        try:
+            return list(range(int(range_arg)))
+        except ValueError:
+            if range_arg in context:
+                try:
+                    return list(range(int(context[range_arg])))
+                except (ValueError, TypeError):
+                    pass
+            return []
+
+    return context.get(list_name)
+
+
 def _process_for_loops(text, context, templates_dir):
     """Process ``{% for var in list %}...{% endfor %}`` blocks recursively.
 
@@ -319,39 +349,7 @@ def _process_for_loops(text, context, templates_dir):
 
             loop_body = text[for_start + 2 : endfor_start]
 
-            # Resolve the iterable from context
-            items = None
-            if list_name.endswith(".items()"):
-                dict_name = list_name[:-8].strip()
-                if dict_name in context:
-                    dict_obj = context[dict_name]
-                    if isinstance(dict_obj, dict):
-                        items = list(dict_obj.items())
-            elif list_name.endswith(".keys()"):
-                dict_name = list_name[:-7].strip()
-                if dict_name in context:
-                    dict_obj = context[dict_name]
-                    if isinstance(dict_obj, dict):
-                        items = list(dict_obj.keys())
-            elif list_name.endswith(".values()"):
-                dict_name = list_name[:-9].strip()
-                if dict_name in context:
-                    dict_obj = context[dict_name]
-                    if isinstance(dict_obj, dict):
-                        items = list(dict_obj.values())
-            elif list_name.startswith("range(") and list_name.endswith(")"):
-                range_arg = list_name[6:-1].strip()
-                try:
-                    items = list(range(int(range_arg)))
-                except ValueError:
-                    if range_arg in context:
-                        try:
-                            items = list(range(int(context[range_arg])))
-                        except (ValueError, TypeError):
-                            items = []
-            else:
-                if list_name in context:
-                    items = context[list_name]
+            items = _resolve_iterable(list_name, context)
 
             if items is not None:
                 rendered_chunks = []
@@ -385,8 +383,6 @@ def _process_for_loops(text, context, templates_dir):
                         loop_text = _process_includes(loop_text, loop_context, templates_dir)
                         rendered_chunks.append(_apply_context(loop_text, loop_context))
                         del loop_context, loop_text
-                        import gc
-
                         gc.collect()
 
                     rendered_loop = "".join(rendered_chunks)
@@ -465,15 +461,8 @@ def _process_includes(text, context, templates_dir):
 
         tag_content = text[start + 2 : end].strip()
         if tag_content.startswith("include"):
-            include_part = tag_content[7:].strip()
-            include_filename = None
-
-            if include_part.startswith('"') and '"' in include_part[1:]:
-                include_filename = include_part[1 : include_part.index('"', 1)]
-            elif include_part.startswith("'") and "'" in include_part[1:]:
-                include_filename = include_part[1 : include_part.index("'", 1)]
-            else:
-                include_filename = include_part.split()[0] if include_part else None
+            include_part = tag_content[7:].strip().strip("\"'")
+            include_filename = include_part.split()[0] if include_part else None
 
             if include_filename:
                 included_content = render_template(include_filename, context, templates_dir)
@@ -528,33 +517,19 @@ class WebServer:
 
         if self._routes_lock:
             with self._routes_lock:
-                # Try exact match first
-                result = self.routes.get(path)
-                if result:
-                    return result
+                return self._lookup_route(path)
 
-                # Try with/without trailing slash
-                if path != "/":
-                    if path.endswith("/"):
-                        result = self.routes.get(path.rstrip("/"))
-                    else:
-                        result = self.routes.get(path + "/")
-                    return result
-                return None
+        return self._lookup_route(path)
 
-        # Try exact match first
+    def _lookup_route(self, path):
+        """Look up a route by path, trying with/without trailing slash."""
+
         result = self.routes.get(path)
-        if result:
+        if result or path == "/":
             return result
 
-        # Try with/without trailing slash
-        if path != "/":
-            if path.endswith("/"):
-                result = self.routes.get(path.rstrip("/"))
-            else:
-                result = self.routes.get(path + "/")
-            return result
-        return None
+        alternate = path.rstrip("/") if path.endswith("/") else path + "/"
+        return self.routes.get(alternate)
 
     def add_route(self, url, view_func):
         """Register a view function for a specific URL path."""
@@ -818,18 +793,6 @@ class WebServer:
         if self._running:
             self._log("websrv: already running")
             return
-
-        # Clean up any leftover temp files from previous runs
-        try:
-            for filename in os.listdir("."):
-                if filename.startswith("tpl_") and filename.endswith(".html"):
-                    try:
-                        os.remove(filename)
-                        self._log(f"websrv: cleaned up temp file {filename}")
-                    except Exception:
-                        pass
-        except Exception:
-            pass
 
         server_address = socket.getaddrinfo(self.host, self.port)[0][-1]
         # Retry socket creation — after a soft reset lingering FDs may briefly
