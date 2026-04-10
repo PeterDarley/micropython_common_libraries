@@ -75,10 +75,18 @@ def _resolve_variable(expression, context):
     """Resolve a dot-notation variable expression against a context dict.
 
     Supports ``variable``, ``variable.key`` (dict), and ``variable.index`` (list/tuple).
+    Quoted string literals (single or double quotes) are returned as-is without lookup.
     Returns an empty string if the variable or any part of the path is not found.
     """
 
-    parts = expression.strip().split(".")
+    expression = expression.strip()
+
+    # Return quoted string literals as plain strings
+    if len(expression) >= 2:
+        if (expression[0] == '"' and expression[-1] == '"') or (expression[0] == "'" and expression[-1] == "'"):
+            return expression[1:-1]
+
+    parts = expression.split(".")
     value = context.get(parts[0])
 
     for part in parts[1:]:
