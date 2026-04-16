@@ -180,14 +180,10 @@ class LEDs:
         def curve_component(value: int) -> int:
             if value == 0:
                 return 0
-            if value == 1:
-                return 1
-            if value == 255:
-                return 255
-            normalized = value / 255.0
+
+            normalized = (value - 1) / 254.0
             adjusted = normalized * normalized
-            result = int(adjusted * 255)
-            return result
+            return 1 + int(adjusted * 254)
 
         return (curve_component(r), curve_component(g), curve_component(b))
 
