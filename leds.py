@@ -89,6 +89,7 @@ class LEDs:
 
         self.count = total_count
         self._brightness = 1.0
+        self._brightness_curve = self._parse_brightness_curve_setting()
         self.brightness = brightness
         self._initialised = True
 
@@ -108,6 +109,17 @@ class LEDs:
             return [{"pin": NEOPIXELS["Pin"], "count": NEOPIXELS["Num"]}]
 
         return []
+
+    def _parse_brightness_curve_setting(self) -> bool:
+        """Check if brightness curve adjustment is enabled in settings.
+
+        Returns:
+            True if BrightnessCurve is enabled in NEOPIXELS settings, False otherwise.
+        """
+        if NEOPIXELS is None or not isinstance(NEOPIXELS, dict):
+            return False
+
+        return NEOPIXELS.get("BrightnessCurve", False)
 
     def _map_index(self, index: int) -> tuple:
         """Map logical index to (strip_index, physical_index).
@@ -149,11 +161,48 @@ class LEDs:
 
         return []
 
+    @staticmethod
+    def _apply_brightness_curve_to_rgb(r: int, g: int, b: int) -> tuple:
+        """Apply quadratic brightness curve to individual RGB components.
+
+        Maps each component 0-255 through a quadratic curve (normalized to 0-1 range).
+        - 0 stays 0 (black stays black)
+        - 255 stays 255 (white stays white)
+        - Values between follow x² curve (gentle at low, aggressive at high)
+
+        Args:
+            r, g, b: RGB values 0-255
+
+        Returns:
+            Tuple of adjusted (r, g, b) values 0-255
+        """
+
+        def curve_component(value: int) -> int:
+            if value == 0:
+                return 0
+            if value == 1:
+                return 1
+            if value == 255:
+                return 255
+            normalized = value / 255.0
+            adjusted = normalized * normalized
+            result = int(adjusted * 255)
+            return result
+
+        return (curve_component(r), curve_component(g), curve_component(b))
+
     def _scale(self, color: tuple) -> tuple:
         """Apply brightness scaling to color."""
-        if self._brightness >= 0.999:
+        brightness = self._brightness
+
+        # Apply quadratic curve adjustment if enabled
+        if self._brightness_curve:
+            r, g, b = color
+            color = self._apply_brightness_curve_to_rgb(r, g, b)
+
+        if brightness >= 0.999:
             return tuple(int(min(255, max(0, c))) for c in color)
-        return tuple(int(min(255, max(0, int(c * self._brightness)))) for c in color)
+        return tuple(int(min(255, max(0, int(c * brightness)))) for c in color)
 
     def set(self, target: int | list | str, color: tuple) -> None:
         """Set pixels `target` to `color` (r,g,b). Does not write to strip until `show()` is called.
