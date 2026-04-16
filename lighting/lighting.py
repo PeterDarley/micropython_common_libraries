@@ -198,11 +198,11 @@ class Lighting:
 
         self.scene_name = None
         self.retained_values = {}
-        self.target_colors = []  # Cache of current target colors for each LED, used by filters like sizzle
-        # self.active_effects = {}
+        self.target_colors = []
 
         self.set_scene()
         self.leds = LEDs()
+        self.logical_colors = [(0, 0, 0)] * self.leds.count
 
         self.animation = Animation(jobs={"lighting": self.process_tick}, stop_callbacks={"lighting": self.stop})
 
@@ -248,13 +248,25 @@ class Lighting:
 
         if hasattr(self, "animation"):
             self.leds.clear()
+            if hasattr(self, "logical_colors"):
+                self.logical_colors = [(0, 0, 0)] * self.leds.count
+
             self.animation.reset()
 
     def stop(self):
-        """Runs on animation stop"""
+        """Runs on animation stop."""
 
         self.leds.clear()
         self.leds.show()
+        self.logical_colors = [(0, 0, 0)] * self.leds.count
+
+    def get_logical_color(self, index: int) -> tuple:
+        """Return the pre-scaled logical color for the given LED index."""
+
+        if 0 <= index < len(self.logical_colors):
+            return self.logical_colors[index]
+
+        return (0, 0, 0)
 
     def _resolve_effect(self, scene_entry: dict) -> dict:
         """Resolve a scene entry into a full effect dict with pattern, colors, target, etc.
@@ -296,12 +308,18 @@ class Lighting:
 
                 # Apply filters if present.
                 if "filters" in effect:
-                    # If no result from the pattern, build one from targets with current colors.
-                    # if not result:
-                    #     targets = self.get_targets(effect["target"])
-                    #     result = [(target, self.leds.get(target)) for target in targets]
+                    stored_filters = self.settings.get("filters", {})
 
-                    for filter_dict in effect["filters"]:
+                    for filter_ref in effect["filters"]:
+                        # Resolve named filter reference to its definition dict.
+                        if isinstance(filter_ref, str):
+                            filter_dict = stored_filters.get(filter_ref)
+                            if not filter_dict:
+                                continue
+
+                        else:
+                            filter_dict = filter_ref
+
                         filter_name = "filter_" + filter_dict["filter"]
                         if hasattr(self, filter_name):
                             filter_func = getattr(self, filter_name)
@@ -312,6 +330,7 @@ class Lighting:
                         updates[led_index] = color
 
         for led_index, color in updates.items():
+            self.logical_colors[led_index] = color
             self.leds.set(led_index, color)
 
         try:
@@ -393,9 +412,9 @@ class Lighting:
         )
 
     def _set_targets(self, targets: list, color: tuple) -> list:
-        """Return (led_index, color) pairs for each target not already at that color."""
+        """Return (led_index, color) pairs for all targets."""
 
-        return [(target, color) for target in targets if self.leds.get(target) != color]
+        return [(target, color) for target in targets]
 
     def filter_null(self, filter_dict: dict, leds: list, tick_number: int) -> list:
         """Null filter: returns the LED list unaltered."""
@@ -403,13 +422,11 @@ class Lighting:
         return leds
 
     def filter_sizzle(self, filter_dict: dict, leds: list, tick_number: int) -> list:
-        """Sizzle filter: generates a random deviation from the first LED's current color
-        and applies that same deviation to all LEDs in the list.
+        """Sizzle filter: applies a uniform random deviation to all LEDs.
 
-        Updates only happen on ticks where tick_number % interval == 0,
-        where interval = 40 // frequency. The deviation is computed once based on
-        the first LED's difference from its target color, then applied uniformly
-        to all LEDs in the list.
+        Generates a single random offset per channel and applies it to every LED's
+        target color. The deviation is bounded by ``variation`` and stepped by ``heat``.
+        Updates only on ticks divisible by ``40 // frequency``.
         """
 
         if not leds:
@@ -425,52 +442,26 @@ class Lighting:
         if tick_number % interval != 0:
             return leds
 
-        # Get the first LED's index and its target color (from the pattern).
-        first_led_index, first_target_color = leds[0]
-        current_red, current_green, current_blue = self.leds.get(first_led_index)
+        # Generate one random deviation per channel.
+        dev_red = random.randint(-heat, heat)
+        dev_green = random.randint(-heat, heat)
+        dev_blue = random.randint(-heat, heat)
 
-        # Compute deviations based on distance from current to target.
-        red_distance = first_target_color[0] - current_red
-        green_distance = first_target_color[1] - current_green
-        blue_distance = first_target_color[2] - current_blue
-
-        # Red channel
-        prob_up_red = max(0.0, min(1.0, 0.5 + red_distance / (2 * variation)))
-        if random.random() < prob_up_red:
-            dev_red = random.randint(1, max(1, heat))
-        else:
-            dev_red = -random.randint(1, max(1, heat))
-
-        # Green channel
-        prob_up_green = max(0.0, min(1.0, 0.5 + green_distance / (2 * variation)))
-        if random.random() < prob_up_green:
-            dev_green = random.randint(1, max(1, heat))
-        else:
-            dev_green = -random.randint(1, max(1, heat))
-
-        # Blue channel
-        prob_up_blue = max(0.0, min(1.0, 0.5 + blue_distance / (2 * variation)))
-        if random.random() < prob_up_blue:
-            dev_blue = random.randint(1, max(1, heat))
-        else:
-            dev_blue = -random.randint(1, max(1, heat))
-
-        # Apply the same deviation to all LEDs in the list.
+        # Apply the same deviation to all LEDs' target colors.
         result = []
-        for led_index, color in leds:
-            new_red = max(0, min(255, color[0] + dev_red))
-            new_green = max(0, min(255, color[1] + dev_green))
-            new_blue = max(0, min(255, color[2] + dev_blue))
+        for led_index, target_color in leds:
+            new_red = max(0, min(255, target_color[0] + dev_red))
+            new_green = max(0, min(255, target_color[1] + dev_green))
+            new_blue = max(0, min(255, target_color[2] + dev_blue))
             result.append((led_index, (new_red, new_green, new_blue)))
 
         return result
 
     def filter_scintillate(self, filter_dict: dict, leds: list, tick_number: int) -> list:
-        """Scintillate filter: generates random deviations for each LED independently.
+        """Scintillate filter: applies independent random deviations to each LED.
 
-        Updates only happen on ticks where tick_number % interval == 0,
-        where interval = 40 // frequency. Each LED's deviation is computed
-        independently based on its own difference from its target color.
+        Each LED gets its own random offset per channel, bounded by ``variation``
+        and stepped by ``heat``. Updates only on ticks divisible by ``40 // frequency``.
         """
 
         if not leds:
@@ -488,35 +479,10 @@ class Lighting:
 
         result = []
         for led_index, target_color in leds:
-            current_red, current_green, current_blue = self.leds.get(led_index)
+            dev_red = random.randint(-heat, heat)
+            dev_green = random.randint(-heat, heat)
+            dev_blue = random.randint(-heat, heat)
 
-            # Compute deviations based on this LED's distance from its target.
-            red_distance = target_color[0] - current_red
-            green_distance = target_color[1] - current_green
-            blue_distance = target_color[2] - current_blue
-
-            # Red channel
-            prob_up_red = max(0.0, min(1.0, 0.5 + red_distance / (2 * variation)))
-            if random.random() < prob_up_red:
-                dev_red = random.randint(1, max(1, heat))
-            else:
-                dev_red = -random.randint(1, max(1, heat))
-
-            # Green channel
-            prob_up_green = max(0.0, min(1.0, 0.5 + green_distance / (2 * variation)))
-            if random.random() < prob_up_green:
-                dev_green = random.randint(1, max(1, heat))
-            else:
-                dev_green = -random.randint(1, max(1, heat))
-
-            # Blue channel
-            prob_up_blue = max(0.0, min(1.0, 0.5 + blue_distance / (2 * variation)))
-            if random.random() < prob_up_blue:
-                dev_blue = random.randint(1, max(1, heat))
-            else:
-                dev_blue = -random.randint(1, max(1, heat))
-
-            # Apply this LED's individual deviation.
             new_red = max(0, min(255, target_color[0] + dev_red))
             new_green = max(0, min(255, target_color[1] + dev_green))
             new_blue = max(0, min(255, target_color[2] + dev_blue))
@@ -617,7 +583,7 @@ class Lighting:
         interval = 40 // frequency
 
         (red, green, blue) = effect_colors[0]
-        (current_red, current_green, current_blue) = self.leds.get(targets[0])
+        (current_red, current_green, current_blue) = self.get_logical_color(targets[0])
 
         if tick_number == 1:
             new_red, new_green, new_blue = red, green, blue
@@ -700,7 +666,7 @@ class Lighting:
 
         # Phase 1: fade every LED one step toward color1.
         for i, target in enumerate(targets):
-            current = self.leds.get(target)
+            current = self.get_logical_color(target)
 
             updates[i] = (
                 target,
