@@ -256,14 +256,37 @@ class Lighting:
         self.leds.clear()
         self.leds.show()
 
+    def _resolve_effect(self, scene_entry: dict) -> dict:
+        """Resolve a scene entry into a full effect dict with pattern, colors, target, etc.
+
+        Supports two formats:
+        - New format: {"effect": "EffectName", "target": "..."} — looks up the effect by name
+        - Legacy format: {"pattern": "solid", "target": "...", "colors": [...]} — used directly
+
+        Returns a merged dict with the target from the scene entry and all other fields from the effect.
+        """
+
+        if "effect" in scene_entry:
+            effect_name = scene_entry["effect"]
+            effects_dict = self.settings.get("effects", {})
+            if effect_name not in effects_dict:
+                return {}
+
+            resolved = dict(effects_dict[effect_name])
+            resolved["target"] = scene_entry.get("target", "all")
+            return resolved
+
+        return scene_entry
+
     def process_tick(self, tick_number: int):
         """Process a single tick of the lighting system."""
 
         updates = {}
 
-        for name, effect in self.settings["scenes"][self.scene_name].items():
-            # if name not in self.active_effects:
-            #     continue
+        for name, scene_entry in self.settings["scenes"][self.scene_name].items():
+            effect = self._resolve_effect(scene_entry)
+            if not effect or "pattern" not in effect:
+                continue
 
             pattern_name = "pattern_" + effect["pattern"]
             if hasattr(self, pattern_name):
