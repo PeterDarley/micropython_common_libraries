@@ -1,8 +1,6 @@
 import math
 import random
 
-import settings
-
 from animation import Animation
 from leds import LEDs
 from storage import PersistentDict
@@ -21,43 +19,43 @@ PATTERN_METADATA: dict = {
     "blink": {
         "description": "Blinking color",
         "required": ["target", "colors"],
-        "optional": ["frequency"],
+        "optional": ["duration"],
         "color_count": 2,
     },
     "pulse": {
         "description": "Pulsing color",
-        "required": ["target", "colors", "duration"],
-        "optional": ["frequency"],
+        "required": ["target", "colors"],
+        "optional": ["duration", "period"],
         "color_count": 2,
     },
     "fade_in": {
         "description": "Fade between two colors",
-        "required": ["target", "colors", "duration"],
-        "optional": [],
+        "required": ["target", "colors"],
+        "optional": ["duration"],
         "color_count": 2,
     },
     "breathe": {
         "description": "Breathing effect",
         "required": ["target", "colors"],
-        "optional": ["frequency"],
+        "optional": ["duration"],
         "color_count": 2,
     },
     "wave": {
         "description": "Moving wave effect",
         "required": ["target", "colors"],
-        "optional": ["frequency", "number", "width", "reverse"],
+        "optional": ["duration", "number", "width", "reverse"],
         "color_count": 2,
     },
     "cylon": {
         "description": "Cylon bouncing effect",
         "required": ["target", "colors"],
-        "optional": ["frequency", "width"],
+        "optional": ["duration", "width"],
         "color_count": 2,
     },
     "phaser_strip": {
         "description": "Two waves from each end converging on a random meeting point",
         "required": ["target", "colors"],
-        "optional": ["frequency", "width"],
+        "optional": ["duration", "width"],
         "color_count": 2,
     },
 }
@@ -198,7 +196,6 @@ class Lighting:
 
         self.scene_name = None
         self.retained_values = {}
-        self.target_colors = []
         self.scene_kwargs = {}
         self.scene_state = {}
         self._scene_functions = {}
@@ -402,7 +399,7 @@ class Lighting:
             if hasattr(self, pattern_name):
                 func = getattr(self, pattern_name)
                 result = func(name=name, effect=effect, tick_number=tick_number)
-                self.target_colors = result  # Cache current target colors for filters to access
+                target_colors = result
 
                 # Apply filters if present.
                 if "filters" in effect:
@@ -421,7 +418,7 @@ class Lighting:
                         filter_name = "filter_" + filter_dict["filter"]
                         if hasattr(self, filter_name):
                             filter_func = getattr(self, filter_name)
-                            result = filter_func(filter_dict, self.target_colors, tick_number=tick_number)
+                            result = filter_func(filter_dict, target_colors, tick_number=tick_number)
 
                 if result:
                     for led_index, color in result:
@@ -531,7 +528,6 @@ class Lighting:
             return leds
 
         frequency = filter_dict.get("frequency", 40)
-        variation = filter_dict.get("variation", 50)
         heat = filter_dict.get("heat", 10)
 
         interval = 40 // frequency
@@ -566,7 +562,6 @@ class Lighting:
             return leds
 
         frequency = filter_dict.get("frequency", 40)
-        variation = filter_dict.get("variation", 50)
         heat = filter_dict.get("heat", 10)
 
         interval = 40 // frequency
@@ -615,34 +610,34 @@ class Lighting:
     def pattern_blink(self, name: str, effect: dict, tick_number: int) -> list:
         """Simple blink function for a lighting effect."""
 
-        interval = 40 // effect.get("frequency", None)
-        duration = interval
-        colors = self._get_effect_colors(effect, 2)
+        half_period = effect.get("duration", 40)
+        effect_colors = self._get_effect_colors(effect, 2)
 
         return self.pattern_periodic(
             name=name,
             effect=effect,
             tick_number=tick_number,
-            interval=interval,
-            duration=duration,
-            colors=colors,
+            interval=half_period,
+            duration=half_period,
+            colors=effect_colors,
             targets=self.get_targets(effect["target"]),
         )
 
     def pattern_pulse(self, name, effect, tick_number) -> list:
         """Simple pulse function for a lighting effect."""
 
-        duration = effect["duration"]
-        interval = 40 // effect.get("frequency", None) - duration
-        colors = self._get_effect_colors(effect, 2)
+        on_ticks = effect.get("duration", 10)
+        period = effect.get("period", 40)
+        interval = max(0, period - on_ticks)
+        effect_colors = self._get_effect_colors(effect, 2)
 
         return self.pattern_periodic(
             name=name,
             effect=effect,
             tick_number=tick_number,
             interval=interval,
-            duration=duration,
-            colors=colors,
+            duration=on_ticks,
+            colors=effect_colors,
             targets=self.get_targets(effect["target"]),
         )
 
@@ -664,9 +659,10 @@ class Lighting:
 
         effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
-        phase = min(tick_number / effect["duration"], 1.0)
+        fade_duration = effect.get("duration", 40)
+        phase = min(tick_number / fade_duration, 1.0)
 
-        if tick_number == effect["duration"]:
+        if tick_number == fade_duration:
             self._count_cycle(name, effect)
 
         return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
@@ -676,9 +672,8 @@ class Lighting:
 
         effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
-        frequency = effect.get("frequency", 1)
-        cycle_ticks = max(1, 40 // frequency)
-        phase = (math.sin(2 * math.pi * frequency * tick_number / 40) + 1) / 2
+        cycle_ticks = max(1, effect.get("duration", 40))
+        phase = (math.sin(2 * math.pi * tick_number / cycle_ticks) + 1) / 2
 
         if tick_number > 0 and (tick_number - 1) % cycle_ticks == cycle_ticks - 1:
             self._count_cycle(name, effect)
@@ -723,6 +718,10 @@ class Lighting:
         step_g = (color2[1] - color1[1]) / fade_ticks
         step_b = (color2[2] - color1[2]) / fade_ticks
 
+        lo_r, hi_r = min(color1[0], color2[0]), max(color1[0], color2[0])
+        lo_g, hi_g = min(color1[1], color2[1]), max(color1[1], color2[1])
+        lo_b, hi_b = min(color1[2], color2[2]), max(color1[2], color2[2])
+
         updates = {}
 
         # Phase 1: fade every LED one step toward color1.
@@ -732,23 +731,15 @@ class Lighting:
             updates[i] = (
                 target,
                 (
-                    int(
-                        max(color1[0], min(color2[0], current[0] - step_r))
-                        if step_r > 0
-                        else max(color2[0], min(color1[0], current[0] - step_r))
-                    ),
-                    int(
-                        max(color1[1], min(color2[1], current[1] - step_g))
-                        if step_g > 0
-                        else max(color2[1], min(color1[1], current[1] - step_g))
-                    ),
-                    int(
-                        max(color1[2], min(color2[2], current[2] - step_b))
-                        if step_b > 0
-                        else max(color2[2], min(color1[2], current[2] - step_b))
-                    ),
+                    int(max(lo_r, min(hi_r, current[0] - step_r))),
+                    int(max(lo_g, min(hi_g, current[1] - step_g))),
+                    int(max(lo_b, min(hi_b, current[2] - step_b))),
                 ),
             )
+
+        # How many LEDs the head can move in a single tick. When > 1, we must
+        # fill the gap so no LEDs are skipped.
+        fill_count = max(1, math.ceil(1 / ticks_per_led)) if ticks_per_led > 0 else 1
 
         # Phase 2: place head at full brightness and blend the transition smoothly.
         for head_position in head_positions:
@@ -763,28 +754,25 @@ class Lighting:
                 sub_position = head_index - head_position  # 0.0 to 1.0
 
             if 0 <= head_index < len(targets):
-                # Head LED always at full color2 brightness for visibility
-                updates[head_index] = (targets[head_index], color2)
+                # Fill head LED and any LEDs skipped since last tick.
+                for offset in range(fill_count):
+                    fill_idx = head_index - offset if not reverse else head_index + offset
+
+                    if 0 <= fill_idx < len(targets):
+                        updates[fill_idx] = (targets[fill_idx], color2)
 
                 # Smooth transition: blend into the next LED for sub-pixel smoothing
                 # Direction depends on reverse flag
                 if not reverse:
                     # Forward: tail extends forward (higher indices)
                     if head_index + 1 < len(targets) and sub_position > 0:
-                        blend_color = (
-                            int(color2[0] * sub_position + color1[0] * (1 - sub_position)),
-                            int(color2[1] * sub_position + color1[1] * (1 - sub_position)),
-                            int(color2[2] * sub_position + color1[2] * (1 - sub_position)),
-                        )
+                        blend_color = self._linear_color(color1, color2, sub_position)
                         updates[head_index + 1] = (targets[head_index + 1], blend_color)
+
                 else:
                     # Reverse: tail extends backward (lower indices)
                     if head_index - 1 >= 0 and sub_position > 0:
-                        blend_color = (
-                            int(color2[0] * sub_position + color1[0] * (1 - sub_position)),
-                            int(color2[1] * sub_position + color1[1] * (1 - sub_position)),
-                            int(color2[2] * sub_position + color1[2] * (1 - sub_position)),
-                        )
+                        blend_color = self._linear_color(color1, color2, sub_position)
                         updates[head_index - 1] = (targets[head_index - 1], blend_color)
 
         return list(updates.values())
@@ -798,13 +786,12 @@ class Lighting:
 
         effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
-        frequency = effect.get("frequency", 1)
         width = effect.get("width", 5)
         reverse = effect.get("reverse", False)
         number = effect.get("number", 1)
 
         num_leds = len(targets)
-        cycle_ticks = max(1, 40 // frequency)
+        cycle_ticks = max(1, effect.get("duration", 40))
         phase = (tick_number - 1) % cycle_ticks
         ticks_per_led = cycle_ticks / max(1, num_leds - 1)
 
@@ -832,11 +819,10 @@ class Lighting:
 
         effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
-        frequency = effect.get("frequency", 1)
         width = effect.get("width", 5)
 
         num_leds = len(targets)
-        one_way_ticks = max(1, 40 // frequency)
+        one_way_ticks = max(1, effect.get("duration", 40))
         cycle_ticks = one_way_ticks * 2
         phase = (tick_number - 1) % cycle_ticks
         ticks_per_led = one_way_ticks / max(1, num_leds - 1)
@@ -870,7 +856,6 @@ class Lighting:
 
         effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
-        frequency = effect.get("frequency", 1)
         width = effect.get("width", 5)
 
         num_leds = len(targets)
@@ -878,7 +863,7 @@ class Lighting:
         if num_leds < 3:
             return []
 
-        cycle_ticks = max(1, 40 // frequency)
+        cycle_ticks = max(1, effect.get("duration", 40))
         ticks_per_led = cycle_ticks / max(1, num_leds - 1)
         fade_ticks = int(max(1, width * ticks_per_led))
         total_ticks = cycle_ticks + fade_ticks
@@ -913,7 +898,7 @@ class Lighting:
                 targets, [right_pos], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=True
             )
 
-            merged = {led_index: color for led_index, color in left_updates}
+            merged = dict(left_updates)
 
             for led_index, color in right_updates:
                 if led_index in merged:
@@ -936,3 +921,47 @@ class Lighting:
 
         # Final tick: reset all LEDs to the background color.
         return [(target, effect_colors[0]) for target in targets]
+
+    def convert_frequencies_to_durations(self) -> int:
+        """Convert all frequency-based pattern params to duration-based in persistent storage.
+
+        For each effect or inline scene entry that has a ``frequency`` key, computes
+        ``duration = max(1, int(40 // frequency))`` and replaces the key in-place.
+        For ``pulse`` effects, the cycle-period ``frequency`` becomes ``period`` instead,
+        since ``duration`` is already used for the on-time.
+
+        Returns the total number of values converted. Saves storage if any conversions
+        were made.
+        """
+
+        count = 0
+        lighting_settings = self.settings_object["lighting_settings"]
+
+        def _convert_entry(entry: dict) -> None:
+            """Convert a single effect/entry dict in-place."""
+
+            nonlocal count
+            if "frequency" not in entry:
+                return
+
+            new_value = max(1, int(40 // entry["frequency"]))
+            del entry["frequency"]
+
+            if entry.get("pattern") == "pulse":
+                entry["period"] = new_value
+            else:
+                entry["duration"] = new_value
+
+            count += 1
+
+        for effect in lighting_settings.get("effects", {}).values():
+            _convert_entry(effect)
+
+        for scene in lighting_settings.get("scenes", {}).values():
+            for entry in scene.values():
+                _convert_entry(entry)
+
+        if count > 0:
+            self.settings_object.store()
+
+        return count
