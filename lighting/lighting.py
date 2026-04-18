@@ -194,7 +194,8 @@ class Lighting:
 
         self.settings = self.settings_object["lighting_settings"]
 
-        self.scene_name = None
+        self._active_scenes: list = []
+        self._scene_start_ticks: dict = {}
         self.retained_values = {}
         self.scene_kwargs = {}
         self.scene_state = {}
@@ -205,6 +206,12 @@ class Lighting:
         self.logical_colors = [(0, 0, 0)] * self.leds.count
 
         self.animation = Animation(jobs={"lighting": self.process_tick}, stop_callbacks={"lighting": self.stop})
+
+    @property
+    def scene_name(self) -> str:
+        """Return the most recently activated scene name, or None."""
+
+        return self._active_scenes[-1] if self._active_scenes else None
 
     def get_pattern_metadata(self) -> dict:
         """Return metadata about all available patterns."""
@@ -232,37 +239,35 @@ class Lighting:
         self._scene_functions[scene_name] = func
 
     def set_scene(self, scene_name: str = None, **kwargs) -> None:
-        """Set the current lighting scene.
+        """Replace all active scenes with a single scene and reset state.
 
         Any additional keyword arguments are stored as ``scene_kwargs`` and
         forwarded to a registered scene function (if one exists for the scene).
         """
 
-        current_scene = getattr(self, "scene_name", None)
-        if current_scene is not None and current_scene == scene_name and not kwargs and not self.scene_finished:
-            return
-
         scenes: dict = self.settings_object["lighting_settings"]["scenes"]
 
         if scene_name is None:
             if "default_scene" in self.settings_object["lighting_settings"]:
-                self.scene_name = self.settings_object["lighting_settings"]["default_scene"]
+                resolved = self.settings_object["lighting_settings"]["default_scene"]
             else:
-                self.scene_name = list(scenes.keys())[0]
+                resolved = list(scenes.keys())[0]
 
         elif scene_name not in scenes:
             raise ValueError(f"Scene '{scene_name}' not found. Available scenes: {list(scenes.keys())}")
 
         else:
-            self.scene_name = scene_name
+            resolved = scene_name
 
+        # Skip if already running just this scene with no kwargs and not finished.
+        if self._active_scenes == [resolved] and not kwargs and not self.scene_finished:
+            return
+
+        self._active_scenes = [resolved]
+        self._scene_start_ticks = {resolved: 0}
         self.scene_kwargs = kwargs
-
-        # for name, effect in self.settings["scenes"][self.scene_name].items():
-        #     if "initial" not in effect or effect["initial"]:
-        #         self.active_effects[name] = {}
-
         self.scene_state = {}
+        self.retained_values = {}
 
         if hasattr(self, "animation"):
             self.leds.clear()
@@ -271,8 +276,48 @@ class Lighting:
 
             self.animation.reset()
 
-        if self.scene_name in self._scene_functions:
-            self._scene_functions[self.scene_name](lighting=self, **kwargs)
+        if resolved in self._scene_functions:
+            self._scene_functions[resolved](lighting=self, **kwargs)
+
+    def add_scene(self, scene_name: str) -> None:
+        """Add a scene to the active set without disturbing currently running scenes.
+
+        The scene starts from the current animation tick. Does nothing if the
+        scene is already active.
+        """
+
+        scenes: dict = self.settings_object["lighting_settings"]["scenes"]
+        if scene_name not in scenes:
+            raise ValueError(f"Scene '{scene_name}' not found.")
+
+        if scene_name in self._active_scenes:
+            return
+
+        self._active_scenes.append(scene_name)
+        current_tick = self.animation.tick_number if hasattr(self, "animation") else 0
+        self._scene_start_ticks[scene_name] = current_tick
+
+        if scene_name in self._scene_functions:
+            self._scene_functions[scene_name](lighting=self)
+
+    def remove_scene(self, scene_name: str) -> None:
+        """Remove a scene from the active set and clean up its state."""
+
+        if scene_name not in self._active_scenes:
+            return
+
+        self._active_scenes.remove(scene_name)
+        self._scene_start_ticks.pop(scene_name, None)
+
+        # Remove all state entries belonging to this scene.
+        prefix = scene_name + "::"
+        for key in list(self.scene_state.keys()):
+            if key.startswith(prefix):
+                del self.scene_state[key]
+
+        for key in list(self.retained_values.keys()):
+            if key.startswith(prefix):
+                del self.retained_values[key]
 
     def stop(self):
         """Runs on animation stop."""
@@ -281,32 +326,37 @@ class Lighting:
         self.leds.show()
         self.logical_colors = [(0, 0, 0)] * self.leds.count
 
-    @property
-    def scene_finished(self) -> bool:
-        """Return True if every effect in the current scene that has a cycles
-        limit has finished.
+    def _is_scene_finished(self, scene_name: str) -> bool:
+        """Return True if all cycle-limited effects in the given scene have finished.
 
-        A scene with no cycle-limited effects is never considered finished.
+        Returns False if the scene has no cycle-limited effects.
         """
 
-        if not self.scene_state:
-            return False
-
-        scene_data = self.settings["scenes"].get(self.scene_name, {})
+        scene_data = self.settings["scenes"].get(scene_name, {})
         has_any_cycles = False
 
-        for name, scene_entry in scene_data.items():
+        for entry_name, scene_entry in scene_data.items():
             effect = self._resolve_effect(scene_entry)
             if not effect or "pattern" not in effect:
                 continue
 
             if effect.get("cycles") is not None:
                 has_any_cycles = True
-                state = self.scene_state.get(name, {})
+                state_key = scene_name + "::" + entry_name
+                state = self.scene_state.get(state_key, {})
                 if not state.get("finished"):
                     return False
 
         return has_any_cycles
+
+    @property
+    def scene_finished(self) -> bool:
+        """Return True if every active scene with cycle-limited effects has finished."""
+
+        if not self._active_scenes:
+            return False
+
+        return all(self._is_scene_finished(s) for s in self._active_scenes)
 
     def is_scene_ongoing(self, scene_name: str) -> bool:
         """Return True if the scene has no cycle-limited effects.
@@ -386,78 +436,88 @@ class Lighting:
 
         updates = {}
 
-        for name, scene_entry in self.settings["scenes"][self.scene_name].items():
-            effect = self._resolve_effect(scene_entry)
-            if not effect or "pattern" not in effect:
-                continue
+        for active_scene_name in self._active_scenes:
+            scene_start = self._scene_start_ticks.get(active_scene_name, 0)
 
-            # Skip effects that have finished their cycles.
-            if self.scene_state.get(name, {}).get("finished"):
-                continue
-
-            # Skip effects waiting on a predecessor to finish.
-            after = scene_entry.get("after")
-            if after:
-                predecessor_state = self.scene_state.get(after, {})
-                if not predecessor_state.get("finished"):
+            for entry_name, scene_entry in self.settings["scenes"][active_scene_name].items():
+                state_key = active_scene_name + "::" + entry_name
+                effect = self._resolve_effect(scene_entry)
+                if not effect or "pattern" not in effect:
                     continue
 
-                # Record the tick this effect became active.
-                if name not in self.scene_state:
-                    self.scene_state[name] = {"start_tick": tick_number}
-                elif "start_tick" not in self.scene_state[name]:
-                    self.scene_state[name]["start_tick"] = tick_number
+                # Skip effects that have finished their cycles.
+                if self.scene_state.get(state_key, {}).get("finished"):
+                    continue
 
-                # Apply inherited target from predecessor's passthrough data.
-                if scene_entry.get("inherit_target"):
-                    passthrough = self.scene_state.get(after, {}).get("passthrough", {})
-                    if "target" in passthrough:
-                        effect = dict(effect)
-                        effect["target"] = passthrough["target"]
+                # Skip effects waiting on a predecessor to finish.
+                after = scene_entry.get("after")
+                if after:
+                    after_key = active_scene_name + "::" + after
+                    predecessor_state = self.scene_state.get(after_key, {})
+                    if not predecessor_state.get("finished"):
+                        continue
 
-            # Compute a local tick number relative to when this effect started.
-            start_tick = self.scene_state.get(name, {}).get("start_tick", 0)
-            local_tick = tick_number - start_tick
+                    # Record the tick this effect became active.
+                    if state_key not in self.scene_state:
+                        self.scene_state[state_key] = {"start_tick": tick_number}
+                    elif "start_tick" not in self.scene_state[state_key]:
+                        self.scene_state[state_key]["start_tick"] = tick_number
 
-            pattern_name = "pattern_" + effect["pattern"]
-            if hasattr(self, pattern_name):
-                func = getattr(self, pattern_name)
-                result = func(name=name, effect=effect, tick_number=local_tick)
-                target_colors = result
+                    # Apply inherited target from predecessor's passthrough data.
+                    if scene_entry.get("inherit_target"):
+                        passthrough = predecessor_state.get("passthrough", {})
+                        if "target" in passthrough:
+                            effect = dict(effect)
+                            effect["target"] = passthrough["target"]
 
-                # If the effect just finished, store its target as passthrough
-                # for any chained successor. Patterns like phaser_strip may set
-                # a more specific passthrough; this preserves that.
-                state = self.scene_state.get(name, {})
-                if state.get("finished") and "passthrough" not in state:
-                    state["passthrough"] = {"target": effect["target"]}
+                # Compute a local tick number relative to when this effect started.
+                start_tick = self.scene_state.get(state_key, {}).get("start_tick", scene_start)
+                local_tick = tick_number - start_tick
 
-                # Apply filters if present.
-                if "filters" in effect:
-                    stored_filters = self.settings.get("filters", {})
+                pattern_name = "pattern_" + effect["pattern"]
+                if hasattr(self, pattern_name):
+                    func = getattr(self, pattern_name)
+                    result = func(name=state_key, effect=effect, tick_number=local_tick)
+                    target_colors = result
 
-                    for filter_ref in effect["filters"]:
-                        # Resolve named filter reference to its definition dict.
-                        if isinstance(filter_ref, str):
-                            filter_dict = stored_filters.get(filter_ref)
-                            if not filter_dict:
-                                continue
+                    # If the effect just finished, store its target as passthrough
+                    # for any chained successor. Patterns like phaser_strip may set
+                    # a more specific passthrough; this preserves that.
+                    state = self.scene_state.get(state_key, {})
+                    if state.get("finished") and "passthrough" not in state:
+                        state["passthrough"] = {"target": effect["target"]}
 
-                        else:
-                            filter_dict = filter_ref
+                    # Apply filters if present.
+                    if "filters" in effect:
+                        stored_filters = self.settings.get("filters", {})
 
-                        filter_name = "filter_" + filter_dict["filter"]
-                        if hasattr(self, filter_name):
-                            filter_func = getattr(self, filter_name)
-                            result = filter_func(filter_dict, target_colors, tick_number=tick_number)
+                        for filter_ref in effect["filters"]:
+                            # Resolve named filter reference to its definition dict.
+                            if isinstance(filter_ref, str):
+                                filter_dict = stored_filters.get(filter_ref)
+                                if not filter_dict:
+                                    continue
 
-                if result:
-                    for led_index, color in result:
-                        updates[led_index] = color
+                            else:
+                                filter_dict = filter_ref
+
+                            filter_name = "filter_" + filter_dict["filter"]
+                            if hasattr(self, filter_name):
+                                filter_func = getattr(self, filter_name)
+                                result = filter_func(filter_dict, target_colors, tick_number=tick_number)
+
+                    if result:
+                        for led_index, color in result:
+                            updates[led_index] = color
 
         for led_index, color in updates.items():
             self.logical_colors[led_index] = color
             self.leds.set(led_index, color)
+
+        # Remove finished immediate scenes from the active set.
+        for active_scene_name in list(self._active_scenes):
+            if self._is_scene_finished(active_scene_name):
+                self.remove_scene(active_scene_name)
 
         try:
             self.leds.show()
