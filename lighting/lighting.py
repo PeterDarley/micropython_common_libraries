@@ -395,11 +395,42 @@ class Lighting:
             if self.scene_state.get(name, {}).get("finished"):
                 continue
 
+            # Skip effects waiting on a predecessor to finish.
+            after = scene_entry.get("after")
+            if after:
+                predecessor_state = self.scene_state.get(after, {})
+                if not predecessor_state.get("finished"):
+                    continue
+
+                # Record the tick this effect became active.
+                if name not in self.scene_state:
+                    self.scene_state[name] = {"start_tick": tick_number}
+                elif "start_tick" not in self.scene_state[name]:
+                    self.scene_state[name]["start_tick"] = tick_number
+
+                # Apply inherited target from predecessor's passthrough data.
+                if scene_entry.get("inherit_target"):
+                    passthrough = self.scene_state.get(after, {}).get("passthrough", {})
+                    if "target" in passthrough:
+                        effect = dict(effect)
+                        effect["target"] = passthrough["target"]
+
+            # Compute a local tick number relative to when this effect started.
+            start_tick = self.scene_state.get(name, {}).get("start_tick", 0)
+            local_tick = tick_number - start_tick
+
             pattern_name = "pattern_" + effect["pattern"]
             if hasattr(self, pattern_name):
                 func = getattr(self, pattern_name)
-                result = func(name=name, effect=effect, tick_number=tick_number)
+                result = func(name=name, effect=effect, tick_number=local_tick)
                 target_colors = result
+
+                # If the effect just finished, store its target as passthrough
+                # for any chained successor. Patterns like phaser_strip may set
+                # a more specific passthrough; this preserves that.
+                state = self.scene_state.get(name, {})
+                if state.get("finished") and "passthrough" not in state:
+                    state["passthrough"] = {"target": effect["target"]}
 
                 # Apply filters if present.
                 if "filters" in effect:
@@ -494,6 +525,13 @@ class Lighting:
             # Check for "all"
             elif target == "all":
                 return list(range(self.leds.count))
+
+            # Plain integer string (e.g., "10" from a web form)
+            else:
+                try:
+                    return [int(target)]
+                except ValueError:
+                    return []
 
         return []
 
@@ -873,6 +911,8 @@ class Lighting:
         if phase == 0 and tick_number > 1:
             self._count_cycle(name, effect)
             if self.scene_state.get(name, {}).get("finished"):
+                meet_index = self.retained_values.get(name, 0)
+                self.scene_state[name]["passthrough"] = {"target": targets[meet_index]}
                 return [(target, effect_colors[0]) for target in targets]
 
         # Pick a new random meeting point at the start of each full sequence.
