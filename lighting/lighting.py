@@ -54,11 +54,11 @@ PATTERN_METADATA: dict = {
         "optional": ["frequency", "width"],
         "color_count": 2,
     },
-    "sizzle": {
-        "description": "Sizzle/twinkle effect",
+    "phaser_strip": {
+        "description": "Two waves from each end converging on a random meeting point",
         "required": ["target", "colors"],
-        "optional": ["frequency", "variation", "heat"],
-        "color_count": 1,
+        "optional": ["frequency", "width"],
+        "color_count": 2,
     },
 }
 
@@ -199,6 +199,9 @@ class Lighting:
         self.scene_name = None
         self.retained_values = {}
         self.target_colors = []
+        self.scene_kwargs = {}
+        self.scene_state = {}
+        self._scene_functions = {}
 
         self.set_scene()
         self.leds = LEDs()
@@ -221,11 +224,25 @@ class Lighting:
 
         colors.update(new_colors)
 
-    def set_scene(self, scene_name: str = None):
-        """Set the current lighting scene."""
+    def register_scene_function(self, scene_name: str, func) -> None:
+        """Register a callable to be invoked when the named scene is activated.
+
+        The function will be called as ``func(lighting=self, **kwargs)`` whenever
+        ``set_scene`` is called with that scene name, where ``kwargs`` are any
+        extra keyword arguments forwarded from ``set_scene``.
+        """
+
+        self._scene_functions[scene_name] = func
+
+    def set_scene(self, scene_name: str = None, **kwargs) -> None:
+        """Set the current lighting scene.
+
+        Any additional keyword arguments are stored as ``scene_kwargs`` and
+        forwarded to a registered scene function (if one exists for the scene).
+        """
 
         current_scene = getattr(self, "scene_name", None)
-        if current_scene is not None and current_scene == scene_name:
+        if current_scene is not None and current_scene == scene_name and not kwargs and not self.scene_finished:
             return
 
         scenes: dict = self.settings_object["lighting_settings"]["scenes"]
@@ -242,9 +259,13 @@ class Lighting:
         else:
             self.scene_name = scene_name
 
+        self.scene_kwargs = kwargs
+
         # for name, effect in self.settings["scenes"][self.scene_name].items():
         #     if "initial" not in effect or effect["initial"]:
         #         self.active_effects[name] = {}
+
+        self.scene_state = {}
 
         if hasattr(self, "animation"):
             self.leds.clear()
@@ -253,12 +274,61 @@ class Lighting:
 
             self.animation.reset()
 
+        if self.scene_name in self._scene_functions:
+            self._scene_functions[self.scene_name](lighting=self, **kwargs)
+
     def stop(self):
         """Runs on animation stop."""
 
         self.leds.clear()
         self.leds.show()
         self.logical_colors = [(0, 0, 0)] * self.leds.count
+
+    @property
+    def scene_finished(self) -> bool:
+        """Return True if every effect in the current scene that has a cycles
+        limit has finished.
+
+        A scene with no cycle-limited effects is never considered finished.
+        """
+
+        if not self.scene_state:
+            return False
+
+        scene_data = self.settings["scenes"].get(self.scene_name, {})
+        has_any_cycles = False
+
+        for name, scene_entry in scene_data.items():
+            effect = self._resolve_effect(scene_entry)
+            if not effect or "pattern" not in effect:
+                continue
+
+            if effect.get("cycles") is not None:
+                has_any_cycles = True
+                state = self.scene_state.get(name, {})
+                if not state.get("finished"):
+                    return False
+
+        return has_any_cycles
+
+    def is_scene_ongoing(self, scene_name: str) -> bool:
+        """Return True if the scene has no cycle-limited effects.
+
+        An ongoing scene never finishes on its own. An immediate scene has at
+        least one effect with a ``cycles`` setting and will eventually finish.
+        """
+
+        scene_data = self.settings["scenes"].get(scene_name, {})
+
+        for name, scene_entry in scene_data.items():
+            effect = self._resolve_effect(scene_entry)
+            if not effect or "pattern" not in effect:
+                continue
+
+            if effect.get("cycles") is not None:
+                return False
+
+        return True
 
     def get_logical_color(self, index: int) -> tuple:
         """Return the pre-scaled logical color for the given LED index."""
@@ -286,9 +356,33 @@ class Lighting:
 
             resolved = dict(effects_dict[effect_name])
             resolved["target"] = scene_entry.get("target", "all")
+
+            if "cycles" in scene_entry:
+                resolved["cycles"] = scene_entry["cycles"]
+
             return resolved
 
         return scene_entry
+
+    def _count_cycle(self, name: str, effect: dict) -> None:
+        """Record that the named effect has completed one cycle.
+
+        If the effect has a ``cycles`` setting, decrement the remaining counter
+        in ``scene_state`` and mark the effect as finished when it reaches zero.
+        """
+
+        cycles = effect.get("cycles", None)
+        if cycles is None:
+            return
+
+        if name not in self.scene_state:
+            self.scene_state[name] = {"remaining": cycles}
+
+        state = self.scene_state[name]
+        state["remaining"] = state.get("remaining", cycles) - 1
+
+        if state["remaining"] <= 0:
+            state["finished"] = True
 
     def process_tick(self, tick_number: int):
         """Process a single tick of the lighting system."""
@@ -298,6 +392,10 @@ class Lighting:
         for name, scene_entry in self.settings["scenes"][self.scene_name].items():
             effect = self._resolve_effect(scene_entry)
             if not effect or "pattern" not in effect:
+                continue
+
+            # Skip effects that have finished their cycles.
+            if self.scene_state.get(name, {}).get("finished"):
                 continue
 
             pattern_name = "pattern_" + effect["pattern"]
@@ -523,6 +621,7 @@ class Lighting:
 
         return self.pattern_periodic(
             name=name,
+            effect=effect,
             tick_number=tick_number,
             interval=interval,
             duration=duration,
@@ -539,6 +638,7 @@ class Lighting:
 
         return self.pattern_periodic(
             name=name,
+            effect=effect,
             tick_number=tick_number,
             interval=interval,
             duration=duration,
@@ -546,11 +646,15 @@ class Lighting:
             targets=self.get_targets(effect["target"]),
         )
 
-    def pattern_periodic(self, name, tick_number, interval, duration, colors, targets) -> list:
+    def pattern_periodic(self, name, effect, tick_number, interval, duration, colors, targets) -> list:
         """Periodic on/off function for a lighting effect."""
 
         cycle_length = duration + interval
         phase = tick_number % cycle_length
+
+        if phase == 0 and tick_number > 0:
+            self._count_cycle(name, effect)
+
         color = colors[0] if phase < duration else colors[1]
 
         return [(target, color) for target in targets]
@@ -561,6 +665,10 @@ class Lighting:
         effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
         phase = min(tick_number / effect["duration"], 1.0)
+
+        if tick_number == effect["duration"]:
+            self._count_cycle(name, effect)
+
         return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
 
     def pattern_breathe(self, name, effect, tick_number) -> list:
@@ -568,61 +676,14 @@ class Lighting:
 
         effect_colors = self._get_effect_colors(effect, 2)
         targets = self.get_targets(effect["target"])
-        phase = (math.sin(2 * math.pi * effect.get("frequency", 1) * tick_number / 40) + 1) / 2
+        frequency = effect.get("frequency", 1)
+        cycle_ticks = max(1, 40 // frequency)
+        phase = (math.sin(2 * math.pi * frequency * tick_number / 40) + 1) / 2
+
+        if tick_number > 0 and (tick_number - 1) % cycle_ticks == cycle_ticks - 1:
+            self._count_cycle(name, effect)
+
         return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
-
-    def pattern_sizzle(self, name, effect, tick_number) -> list:
-        """Sizzle function: fluctuates around a base color with random variations."""
-
-        effect_colors = self._get_effect_colors(effect, 1)
-        targets = self.get_targets(effect["target"])
-        frequency = effect.get("frequency", 40)
-        variation = effect.get("variation", 50)
-        heat = effect.get("heat", 10)
-
-        interval = 40 // frequency
-
-        (red, green, blue) = effect_colors[0]
-        (current_red, current_green, current_blue) = self.get_logical_color(targets[0])
-
-        if tick_number == 1:
-            new_red, new_green, new_blue = red, green, blue
-
-        elif tick_number % interval == 0:
-            # Signed probability: 0.5 at target, biased toward target as distance grows
-            red_distance = red - current_red
-            green_distance = green - current_green
-            blue_distance = blue - current_blue
-
-            step = random.randint(1, max(1, heat))
-            prob_up_red = max(0.0, min(1.0, 0.5 + red_distance / (2 * variation)))
-            if random.random() < prob_up_red:
-                new_red = current_red + step
-            else:
-                new_red = current_red - step
-
-            step = random.randint(1, max(1, heat))
-            prob_up_green = max(0.0, min(1.0, 0.5 + green_distance / (2 * variation)))
-            if random.random() < prob_up_green:
-                new_green = current_green + step
-            else:
-                new_green = current_green - step
-
-            step = random.randint(1, max(1, heat))
-            prob_up_blue = max(0.0, min(1.0, 0.5 + blue_distance / (2 * variation)))
-            if random.random() < prob_up_blue:
-                new_blue = current_blue + step
-            else:
-                new_blue = current_blue - step
-
-            new_red = max(0, min(255, new_red))
-            new_green = max(0, min(255, new_green))
-            new_blue = max(0, min(255, new_blue))
-
-        else:
-            return []
-
-        return [(target, (new_red, new_green, new_blue)) for target in targets]
 
     def _wave_head_position(self, num_leds: int, cycle_ticks: int, phase: int, reverse: bool) -> float:
         """Return the head LED position (as a float) for a wave at the given phase.
@@ -747,6 +808,11 @@ class Lighting:
         phase = (tick_number - 1) % cycle_ticks
         ticks_per_led = cycle_ticks / max(1, num_leds - 1)
 
+        if phase == 0 and tick_number > 1:
+            self._count_cycle(name, effect)
+            if self.scene_state.get(name, {}).get("finished"):
+                return self._set_targets(targets, effect_colors[0])
+
         spacing = cycle_ticks // number
         head_positions = [
             self._wave_head_position(num_leds, cycle_ticks, (phase + peak * spacing) % cycle_ticks, reverse)
@@ -775,6 +841,11 @@ class Lighting:
         phase = (tick_number - 1) % cycle_ticks
         ticks_per_led = one_way_ticks / max(1, num_leds - 1)
 
+        if phase == 0 and tick_number > 1:
+            self._count_cycle(name, effect)
+            if self.scene_state.get(name, {}).get("finished"):
+                return self._set_targets(targets, effect_colors[0])
+
         if phase < one_way_ticks:
             head_position = self._wave_head_position(num_leds, one_way_ticks, phase, reverse=False)
             return self._render_wave(
@@ -785,3 +856,83 @@ class Lighting:
             return self._render_wave(
                 targets, [head_position], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=True
             )
+
+    def pattern_phaser_strip(self, name: str, effect: dict, tick_number: int) -> list:
+        """Phaser strip: two waves start at opposite ends of the target range and converge
+        on a randomly chosen meeting point, both arriving at the same tick.
+
+        After the waves meet, the effect holds the meeting LED lit while all
+        trails fade out, then resets every LED to the background color before
+        the cycle is considered complete.
+
+        A new meeting point is picked at the start of each cycle.
+        """
+
+        effect_colors = self._get_effect_colors(effect, 2)
+        targets = self.get_targets(effect["target"])
+        frequency = effect.get("frequency", 1)
+        width = effect.get("width", 5)
+
+        num_leds = len(targets)
+
+        if num_leds < 3:
+            return []
+
+        cycle_ticks = max(1, 40 // frequency)
+        ticks_per_led = cycle_ticks / max(1, num_leds - 1)
+        fade_ticks = int(max(1, width * ticks_per_led))
+        total_ticks = cycle_ticks + fade_ticks
+        phase = (tick_number - 1) % total_ticks
+
+        # Count the cycle at the very last tick of the full sequence.
+        if phase == 0 and tick_number > 1:
+            self._count_cycle(name, effect)
+            if self.scene_state.get(name, {}).get("finished"):
+                return [(target, effect_colors[0]) for target in targets]
+
+        # Pick a new random meeting point at the start of each full sequence.
+        if name not in self.retained_values or phase == 0:
+            meet_index = random.randint(1, num_leds - 2)
+            self.retained_values[name] = meet_index
+        else:
+            meet_index = self.retained_values[name]
+
+        # Phase 1: converge — waves travel toward the meeting point.
+        if phase < cycle_ticks:
+            if cycle_ticks > 1:
+                left_pos = phase * meet_index / (cycle_ticks - 1)
+                right_pos = (num_leds - 1) - phase * (num_leds - 1 - meet_index) / (cycle_ticks - 1)
+            else:
+                left_pos = float(meet_index)
+                right_pos = float(meet_index)
+
+            left_updates = self._render_wave(
+                targets, [left_pos], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=False
+            )
+            right_updates = self._render_wave(
+                targets, [right_pos], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=True
+            )
+
+            merged = {led_index: color for led_index, color in left_updates}
+
+            for led_index, color in right_updates:
+                if led_index in merged:
+                    if sum(color) > sum(merged[led_index]):
+                        merged[led_index] = color
+                else:
+                    merged[led_index] = color
+
+            return list(merged.items())
+
+        # Phase 2: fade — hold meeting LED, let trails decay naturally.
+        fade_phase = phase - cycle_ticks
+
+        if fade_phase < fade_ticks - 1:
+            # Render a stationary wave at the meeting point so _render_wave
+            # continues to fade all other LEDs toward color1 each tick.
+            return self._render_wave(
+                targets, [float(meet_index)], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=False
+            )
+
+        # Final tick: reset all LEDs to the background color.
+        return [(target, effect_colors[0]) for target in targets]

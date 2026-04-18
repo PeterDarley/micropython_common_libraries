@@ -115,11 +115,55 @@ def _resolve_variable(expression, context):
     return "" if value is None else str(value)
 
 
-def _evaluate_condition(expression, context):
-    """Evaluate a conditional expression against a context dict.
+def _resolve_variable_raw(expression, context):
+    """Resolve a dot-notation variable expression and return the raw Python object.
+
+    Unlike ``_resolve_variable``, this does not convert the result to a string.
+    Returns None if the variable is not found.
+    """
+
+    expression = expression.strip()
+
+    if len(expression) >= 2:
+        if (expression[0] == '"' and expression[-1] == '"') or (expression[0] == "'" and expression[-1] == "'"):
+            return expression[1:-1]
+
+    parts = expression.split(".")
+    value = context.get(parts[0])
+
+    for part in parts[1:]:
+        if value is None:
+            return None
+
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif isinstance(value, (list, tuple)):
+            try:
+                value = value[int(part)]
+            except ValueError:
+                if part in context:
+                    try:
+                        value = value[int(context[part])]
+                    except (ValueError, TypeError, IndexError):
+                        return None
+                else:
+                    return None
+            except IndexError:
+                return None
+        else:
+            return None
+
+    return value
+
+
+def _evaluate_single_condition(expression, context):
+    """Evaluate a single conditional expression (no ``and``/``or``) against a context dict.
 
     Supports:
     - Simple variables: ``variable``, ``variable.key``, ``variable.0``
+    - ``not variable`` — logical negation
+    - ``variable in list_variable`` — membership test
+    - ``variable not in list_variable`` — negated membership test
     - Equality comparisons: ``variable == value`` or ``variable == variable2``
     - Inequality comparisons: ``variable != value`` or ``variable != variable2``
 
@@ -128,6 +172,32 @@ def _evaluate_condition(expression, context):
     """
 
     expression = expression.strip()
+
+    # Handle ``not`` prefix (but not ``not in``)
+    if expression.startswith("not ") and " in " not in expression:
+        return not _evaluate_single_condition(expression[4:], context)
+
+    # Handle ``not in`` operator
+    if " not in " in expression:
+        parts = expression.split(" not in ", 1)
+        if len(parts) == 2:
+            left = _resolve_variable(parts[0].strip(), context)
+            right = _resolve_variable_raw(parts[1].strip(), context)
+            if isinstance(right, (list, tuple, dict, str)):
+                return left not in (right if isinstance(right, (dict, str)) else [str(item) for item in right])
+
+            return True
+
+    # Handle ``in`` operator
+    if " in " in expression:
+        parts = expression.split(" in ", 1)
+        if len(parts) == 2:
+            left = _resolve_variable(parts[0].strip(), context)
+            right = _resolve_variable_raw(parts[1].strip(), context)
+            if isinstance(right, (list, tuple, dict, str)):
+                return left in (right if isinstance(right, (dict, str)) else [str(item) for item in right])
+
+            return False
 
     # Check for != operator (must check before == to avoid false split on !==)
     if "!=" in expression:
@@ -145,9 +215,40 @@ def _evaluate_condition(expression, context):
             right = _resolve_variable(parts[1].strip(), context)
             return left == right
 
-    # Simple variable evaluation
-    resolved = _resolve_variable(expression, context)
-    return resolved not in ("", "0", "False", "None")
+    # Simple variable evaluation — use raw value so collections are truthy/falsy correctly.
+    raw = _resolve_variable_raw(expression, context)
+    if raw is None:
+        return False
+
+    if isinstance(raw, (list, tuple, dict)):
+        return len(raw) > 0
+
+    return str(raw) not in ("", "0", "False", "None")
+
+
+def _evaluate_condition(expression, context):
+    """Evaluate a conditional expression against a context dict.
+
+    Supports ``and`` and ``or`` connectives (evaluated left-to-right with
+    ``and`` binding tighter than ``or``), as well as ``not`` prefix on
+    individual terms.
+    """
+
+    # Split on `` or `` first (lower precedence), then `` and `` within each group.
+    or_groups = expression.split(" or ")
+    for or_group in or_groups:
+        and_parts = or_group.split(" and ")
+        group_result = True
+
+        for part in and_parts:
+            if not _evaluate_single_condition(part, context):
+                group_result = False
+                break
+
+        if group_result:
+            return True
+
+    return False
 
 
 def _apply_context(text, context):
@@ -182,11 +283,16 @@ def _apply_context(text, context):
 def _process_if_blocks(text, context):
     """Process ``{% if expression %}...{% endif %}`` blocks in text.
 
-    Supports simple variables and equality comparisons:
+    Supports:
     - ``{% if variable %}`` — true if truthy (non-empty, not '0', 'False', 'None')
-    - ``{% if variable.key }}`` — dot-notation access
-    - ``{% if variable == value }}`` — equality check (variable can use dot-notation)
-    - ``{% if variable != value }}`` — inequality check (variable can use dot-notation)
+    - ``{% if variable.key %}`` — dot-notation access
+    - ``{% if variable == value %}`` — equality check
+    - ``{% if variable != value %}`` — inequality check
+    - ``{% if variable in list %}`` — membership test
+    - ``{% if variable not in list %}`` — negated membership test
+    - ``{% if condition and condition %}`` — logical AND
+    - ``{% if condition or condition %}`` — logical OR
+    - ``{% if not variable %}`` — logical negation
     - ``{% else %}`` blocks are also supported
 
     Nested ``{% if %}`` blocks are handled correctly via depth tracking.
@@ -299,32 +405,6 @@ def _resolve_iterable(list_name, context):
             return []
 
     return context.get(list_name) if "." not in list_name else _resolve_variable_raw(list_name, context)
-
-
-def _resolve_variable_raw(expression, context):
-    """Resolve a dot-notation path and return the raw Python object (not stringified).
-
-    Unlike ``_resolve_variable``, this returns the actual dict/list/tuple value
-    rather than converting it to a string.
-    """
-
-    parts = expression.strip().split(".")
-    value = context.get(parts[0])
-
-    for part in parts[1:]:
-        if value is None:
-            return None
-        if isinstance(value, dict):
-            value = value.get(part)
-        elif isinstance(value, (list, tuple)):
-            try:
-                value = value[int(part)]
-            except (ValueError, IndexError):
-                return None
-        else:
-            return None
-
-    return value
 
 
 def _process_for_loops(text, context, templates_dir):
@@ -440,7 +520,8 @@ def render_template(template_file, context=None, templates_dir="templates"):
     (including ``{% for key, value in dict.items() %}``, ``{% for key in dict.keys() %}``,
     ``{% for value in dict.values() %}``, and ``{% for i in range(n) %}`` where *n* is
     an integer literal or a context variable),
-    ``{% if expression %}...{% endif %}`` conditionals (including == comparisons),
+    ``{% if expression %}...{% endif %}`` conditionals (including ``==``, ``!=``,
+    ``in``, ``not in``, ``and``, ``or``, and ``not``),
     and dot-notation for dicts/lists (e.g. ``{{ item.key }}``, ``{{ item.0 }}``).
 
     Args:
