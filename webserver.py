@@ -512,6 +512,24 @@ def _process_for_loops(text, context, templates_dir):
     return text
 
 
+# Module-level context processor hook.  Call set_context_processor() to
+# register a callable that returns a dict merged into every render_template call.
+_context_processor = None
+
+
+def set_context_processor(func) -> None:
+    """Register a global context processor callable.
+
+    The callable is invoked with no arguments on every ``render_template`` call
+    and its return value (a dict) is merged into the template context before
+    rendering.  Keys supplied by the caller take precedence over those returned
+    by the processor.
+    """
+
+    global _context_processor
+    _context_processor = func
+
+
 def render_template(template_file, context=None, templates_dir="templates"):
     """Load a template file and substitute ``{{ key }}`` placeholders.
 
@@ -533,6 +551,18 @@ def render_template(template_file, context=None, templates_dir="templates"):
     Returns:
         The rendered string, or ``None`` if the file could not be read.
     """
+
+    # Start with global context-processor values, then overlay caller-supplied keys.
+    if _context_processor is not None:
+        try:
+            base = _context_processor()
+        except Exception:
+            base = {}
+
+        if context:
+            base.update(context)
+
+        context = base
 
     if context is None:
         context = {}
