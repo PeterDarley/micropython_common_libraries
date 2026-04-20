@@ -27,6 +27,82 @@ try:
 except Exception:
     _THREAD = False
 
+# Maximum allowed request body size (512 KB).
+_MAX_REQUEST_BODY = 524288
+
+
+def _parse_multipart(body: bytes, boundary: str) -> tuple:
+    """Parse a multipart/form-data body into form fields and file uploads.
+
+    Returns a tuple of ``(form_data_dict, files_dict)`` where
+    *form_data_dict* maps field names to string values and *files_dict*
+    maps field names to dicts with ``filename``, ``content_type``, and
+    ``data`` (bytes) keys.
+    """
+
+    boundary_bytes = ("--" + boundary).encode()
+    form_data = {}
+    files = {}
+
+    parts = body.split(boundary_bytes)
+
+    for part in parts:
+        # Strip boundary framing CRLFs
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+
+        # Skip empty parts and the closing delimiter marker
+        if not part or part == b"--" or part.startswith(b"--"):
+            continue
+
+        # Separate part headers from body
+        separator = part.find(b"\r\n\r\n")
+        if separator == -1:
+            continue
+
+        part_headers = part[:separator]
+        part_body = part[separator + 4 :]
+
+        # Extract Content-Disposition and Content-Type
+        field_name = ""
+        filename = ""
+        content_type = ""
+
+        for header_line in part_headers.split(b"\r\n"):
+            decoded_line = header_line.decode("utf-8", "replace")
+            lower_line = decoded_line.lower()
+
+            if lower_line.startswith("content-disposition:"):
+                disposition = decoded_line.split(":", 1)[1].strip()
+
+                for param in disposition.split(";"):
+                    param = param.strip()
+
+                    if param.startswith("name="):
+                        field_name = param[5:].strip('"')
+                    elif param.startswith("filename="):
+                        filename = param[9:].strip('"')
+
+            elif lower_line.startswith("content-type:"):
+                content_type = decoded_line.split(":", 1)[1].strip()
+
+        if not field_name:
+            continue
+
+        if filename:
+            files[field_name] = {
+                "filename": filename,
+                "content_type": content_type,
+                "data": part_body,
+            }
+        else:
+            form_data[field_name] = part_body.decode("utf-8", "replace")
+
+    return form_data, files
+
 
 def _parse_form_data(body_string):
     """Parse a URL-encoded form body into a dict of key->value pairs.
@@ -719,12 +795,12 @@ class WebServer:
                 self._log("websrv: accepted connection from", cl_sock.getpeername())
             except Exception:
                 pass
-            request = cl_sock.recv(2048)
-            if not request:
+            data = cl_sock.recv(2048)
+            if not data:
                 return
 
             # parse request line
-            first_line = request.split(b"\r\n", 1)[0]
+            first_line = data.split(b"\r\n", 1)[0]
             self._log("websrv: request:", first_line)
             parts = first_line.split()
             if len(parts) < 2:
@@ -738,14 +814,55 @@ class WebServer:
             else:
                 path, query = raw_path, ""
 
-            # parse body and form data from any request
+            # Parse HTTP headers
+            headers = {}
+            header_end = data.find(b"\r\n\r\n")
+            if header_end != -1:
+                for header_line in data[:header_end].split(b"\r\n")[1:]:
+                    if b":" in header_line:
+                        header_key, header_value = header_line.split(b":", 1)
+                        headers[header_key.decode().strip().lower()] = header_value.decode().strip()
+
+            # Read full body based on Content-Length
             raw_body = b""
             form_data = {}
-            header_end = request.find(b"\r\n\r\n")
+            files = {}
+
             if header_end != -1:
-                raw_body = request[header_end + 4 :]
+                content_length = int(headers.get("content-length", 0))
+
+                if content_length > _MAX_REQUEST_BODY:
+                    return self._send_response(
+                        cl_sock, 413, "Payload Too Large", b"Request body too large", "text/plain"
+                    )
+
+                raw_body = data[header_end + 4 :]
+
+                while len(raw_body) < content_length:
+                    chunk = cl_sock.recv(min(4096, content_length - len(raw_body)))
+                    if not chunk:
+                        break
+
+                    raw_body += chunk
+
+                # Parse body based on content type
+                content_type_header = headers.get("content-type", "")
+
                 if raw_body:
-                    form_data = _parse_form_data(raw_body.decode("utf-8", "replace"))
+                    if "multipart/form-data" in content_type_header:
+                        boundary = ""
+
+                        for param in content_type_header.split(";"):
+                            param = param.strip()
+
+                            if param.startswith("boundary="):
+                                boundary = param[9:].strip('"')
+
+                        if boundary:
+                            form_data, files = _parse_multipart(raw_body, boundary)
+
+                    else:
+                        form_data = _parse_form_data(raw_body.decode("utf-8", "replace"))
 
             # Routes take precedence
             self._log("websrv: checking route for path:", path, "available routes:", list(self.routes.keys()))
@@ -759,9 +876,10 @@ class WebServer:
                         path=path,
                         query=query,
                         raw_path=raw_path,
-                        headers={},
+                        headers=headers,
                         body=raw_body,
                         form_data=form_data,
+                        files=files,
                     )
                     if isinstance(route_handler, type) and issubclass(route_handler, View):
                         response = route_handler().dispatch(request)
@@ -847,6 +965,10 @@ class WebServer:
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
         ".svg": "image/svg+xml",
+        ".ttf": "font/ttf",
+        ".woff": "font/woff",
+        ".woff2": "font/woff2",
+        ".otf": "font/otf",
     }
 
     def _guess_mime(self, filename):
@@ -1036,12 +1158,13 @@ class Request:
         body: raw request body bytes or None.
     """
 
-    def __init__(self, method, path, query="", raw_path=None, headers=None, body=None, form_data=None):
+    def __init__(self, method, path, query="", raw_path=None, headers=None, body=None, form_data=None, files=None):
         """Create a Request object.
 
         The server currently provides minimal parsing: method, path, query,
-        body, and form_data (for POST requests).
+        body, form_data (for POST requests), and files (for multipart uploads).
         """
+
         self.method = method
         self.path = path
         self.query = query
@@ -1049,6 +1172,7 @@ class Request:
         self.headers = headers or {}
         self.body = body
         self.form_data = form_data or {}
+        self.files = files or {}
 
     @property
     def query_params(self) -> dict:
