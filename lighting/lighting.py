@@ -283,7 +283,8 @@ class Lighting:
         """Add a scene to the active set without disturbing currently running scenes.
 
         The scene starts from the current animation tick. Does nothing if the
-        scene is already active.
+        scene is already active. If the scene has a ``kills`` list in its
+        scene_settings, those scenes are removed before this one is added.
         """
 
         scenes: dict = self.settings_object["lighting_settings"]["scenes"]
@@ -292,6 +293,11 @@ class Lighting:
 
         if scene_name in self._active_scenes:
             return
+
+        # Remove any scenes listed in this scene's kills setting.
+        scene_meta: dict = self.settings.get("scene_settings", {}).get(scene_name, {})
+        for kill_name in scene_meta.get("kills", []):
+            self.remove_scene(kill_name)
 
         self._active_scenes.append(scene_name)
         current_tick = self.animation.tick_number if hasattr(self, "animation") else 0
