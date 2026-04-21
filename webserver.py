@@ -1004,16 +1004,22 @@ class WebServer:
         """Send an HTTP response streaming from a file on disk.
 
         Streams the file in 1KB chunks to avoid loading it all into memory.
+        Includes Cache-Control and ETag headers for static asset caching.
         Cleans up the file after sending.
         """
 
         try:
-            # Get file size (os.stat returns (size, ...) tuple in MicroPython)
-            file_size = os.stat(file_path)[6]
+            # Get file stats (size at index 6, mtime at index 8 in MicroPython)
+            stat = os.stat(file_path)
+            file_size = stat[6]
+            file_mtime = stat[8] if len(stat) > 8 else 0
 
-            # Send HTTP headers
-            header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n".format(
-                status_code, reason, content_type, file_size
+            # Generate simple ETag from size and mtime
+            etag = '"{}-{}"'.format(file_size, file_mtime)
+
+            # Send HTTP headers with caching directives
+            header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=2592000\r\nETag: {}\r\n\r\n".format(
+                status_code, reason, content_type, file_size, etag
             )
             cl_sock.send(header.encode("utf-8"))
 
