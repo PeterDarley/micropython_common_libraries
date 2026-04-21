@@ -334,26 +334,26 @@ def _apply_context(text, context):
     ``variable.0``). Unknown variables are replaced with an empty string.
     """
 
-    result = ""
+    chunks = []
     pos = 0
 
     while pos < len(text):
         start = text.find("{{", pos)
         if start == -1:
-            result += text[pos:]
+            chunks.append(text[pos:])
             break
 
         end = text.find("}}", start + 2)
         if end == -1:
-            result += text[pos:]
+            chunks.append(text[pos:])
             break
 
-        result += text[pos:start]
+        chunks.append(text[pos:start])
         expression = text[start + 2 : end].strip()
-        result += _resolve_variable(expression, context)
+        chunks.append(_resolve_variable(expression, context))
         pos = end + 2
 
-    return result
+    return "".join(chunks)
 
 
 def _process_if_blocks(text, context):
@@ -442,13 +442,11 @@ def _process_if_blocks(text, context):
             # Evaluate condition
             is_truthy = _evaluate_condition(expression, context)
 
-            if is_truthy:
-                text = text[:start] + if_body + text[endif_start + 11 :]
-            else:
-                text = text[:start] + else_body + text[endif_start + 11 :]
+            chosen = if_body if is_truthy else else_body
+            text = "".join((text[:start], chosen, text[endif_start + 11 :]))
         else:
             # Malformed if tag, skip it
-            text = text[:start] + text[if_start + 2 :]
+            text = "".join((text[:start], text[if_start + 2 :]))
 
     return text
 
@@ -573,17 +571,17 @@ def _process_for_loops(text, context, templates_dir):
                         loop_text = _process_includes(loop_text, loop_context, templates_dir)
                         rendered_chunks.append(_apply_context(loop_text, loop_context))
                         del loop_context, loop_text
-                        gc.collect()
 
+                    gc.collect()
                     rendered_loop = "".join(rendered_chunks)
-                    text = text[:start] + rendered_loop + text[endfor_start + 12 :]
+                    text = "".join((text[:start], rendered_loop, text[endfor_start + 12 :]))
 
                 except Exception:
-                    text = text[:start] + text[endfor_start + 12 :]
+                    text = "".join((text[:start], text[endfor_start + 12 :]))
             else:
-                text = text[:start] + text[endfor_start + 12 :]
+                text = "".join((text[:start], text[endfor_start + 12 :]))
         else:
-            text = text[:start] + text[for_start + 2 :]
+            text = "".join((text[:start], text[for_start + 2 :]))
 
     return text
 
@@ -787,135 +785,160 @@ class WebServer:
 
         return _decorator
 
+    def _read_request(self, cl_sock):
+        """Read and parse one HTTP request from *cl_sock*.
+
+        Returns a tuple ``(method, path, query, raw_path, headers, raw_body,
+        form_data, files, keep_alive)`` or ``None`` if the connection should close.
+        """
+
+        data = cl_sock.recv(4096)
+        if not data:
+            return None
+
+        # Parse request line
+        first_line = data.split(b"\r\n", 1)[0]
+        self._log("websrv: request:", first_line)
+        parts = first_line.split()
+        if len(parts) < 2:
+            return None
+        method = parts[0].decode()
+        raw_path = parts[1].decode()
+        http_version = parts[2].decode() if len(parts) > 2 else "HTTP/1.0"
+
+        # Split query string
+        if "?" in raw_path:
+            path, query = raw_path.split("?", 1)
+        else:
+            path, query = raw_path, ""
+
+        # Parse headers
+        headers = {}
+        header_end = data.find(b"\r\n\r\n")
+        if header_end != -1:
+            for header_line in data[:header_end].split(b"\r\n")[1:]:
+                if b":" in header_line:
+                    header_key, header_value = header_line.split(b":", 1)
+                    headers[header_key.decode().strip().lower()] = header_value.decode().strip()
+
+        # Determine keep-alive: HTTP/1.1 defaults on, HTTP/1.0 defaults off
+        connection_header = headers.get("connection", "").lower()
+        if http_version == "HTTP/1.1":
+            keep_alive = connection_header != "close"
+        else:
+            keep_alive = connection_header == "keep-alive"
+
+        # Read body
+        raw_body = b""
+        form_data = {}
+        files = {}
+
+        if header_end != -1:
+            content_length = int(headers.get("content-length", 0))
+
+            if content_length > _MAX_REQUEST_BODY:
+                return None  # caller sends 413 and closes
+
+            raw_body = data[header_end + 4 :]
+            while len(raw_body) < content_length:
+                chunk = cl_sock.recv(min(4096, content_length - len(raw_body)))
+                if not chunk:
+                    break
+                raw_body += chunk
+
+            content_type_header = headers.get("content-type", "")
+            if raw_body:
+                if "multipart/form-data" in content_type_header:
+                    boundary = ""
+                    for param in content_type_header.split(";"):
+                        param = param.strip()
+                        if param.startswith("boundary="):
+                            boundary = param[9:].strip('"')
+                    if boundary:
+                        form_data, files = _parse_multipart(raw_body, boundary)
+                else:
+                    form_data = _parse_form_data(raw_body.decode("utf-8", "replace"))
+
+        return (method, path, query, raw_path, headers, raw_body, form_data, files, keep_alive)
+
     def _handle_client(self, cl_sock):
-        """Read one HTTP request from *cl_sock* and send a response."""
+        """Handle one client connection, serving multiple requests if keep-alive."""
 
         try:
             try:
                 self._log("websrv: accepted connection from", cl_sock.getpeername())
             except Exception:
                 pass
-            data = cl_sock.recv(2048)
-            if not data:
-                return
 
-            # parse request line
-            first_line = data.split(b"\r\n", 1)[0]
-            self._log("websrv: request:", first_line)
-            parts = first_line.split()
-            if len(parts) < 2:
-                return
-            method = parts[0].decode()
-            raw_path = parts[1].decode()
+            # Idle keep-alive connections should not block the thread forever
+            try:
+                cl_sock.settimeout(5.0)
+            except Exception:
+                pass
 
-            # split query string if present
-            if "?" in raw_path:
-                path, query = raw_path.split("?", 1)
-            else:
-                path, query = raw_path, ""
+            while True:
+                parsed = self._read_request(cl_sock)
+                if parsed is None:
+                    break
 
-            # Parse HTTP headers
-            headers = {}
-            header_end = data.find(b"\r\n\r\n")
-            if header_end != -1:
-                for header_line in data[:header_end].split(b"\r\n")[1:]:
-                    if b":" in header_line:
-                        header_key, header_value = header_line.split(b":", 1)
-                        headers[header_key.decode().strip().lower()] = header_value.decode().strip()
+                method, path, query, raw_path, headers, raw_body, form_data, files, keep_alive = parsed
 
-            # Read full body based on Content-Length
-            raw_body = b""
-            form_data = {}
-            files = {}
+                self._log("websrv: checking route for path:", path)
+                route_handler = self._get_route(path)
 
-            if header_end != -1:
-                content_length = int(headers.get("content-length", 0))
+                if route_handler:
+                    self._log("websrv: routing to", path)
+                    try:
+                        request = Request(
+                            method=method,
+                            path=path,
+                            query=query,
+                            raw_path=raw_path,
+                            headers=headers,
+                            body=raw_body,
+                            form_data=form_data,
+                            files=files,
+                        )
+                        if isinstance(route_handler, type) and issubclass(route_handler, View):
+                            response = route_handler().dispatch(request)
+                        elif isinstance(route_handler, View):
+                            response = route_handler.dispatch(request)
+                        else:
+                            response = route_handler(request)
 
-                if content_length > _MAX_REQUEST_BODY:
-                    return self._send_response(
-                        cl_sock, 413, "Payload Too Large", b"Request body too large", "text/plain"
-                    )
-
-                raw_body = data[header_end + 4 :]
-
-                while len(raw_body) < content_length:
-                    chunk = cl_sock.recv(min(4096, content_length - len(raw_body)))
-                    if not chunk:
+                        self._send_result(cl_sock, response, keep_alive=keep_alive)
+                    except Exception as e:
+                        self._log("websrv: route handler exception:", e)
+                        self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
                         break
 
-                    raw_body += chunk
+                elif method == "POST":
+                    self._send_response(cl_sock, 404, "Not Found", b"Not Found", "text/plain")
+                    break
 
-                # Parse body based on content type
-                content_type_header = headers.get("content-type", "")
-
-                if raw_body:
-                    if "multipart/form-data" in content_type_header:
-                        boundary = ""
-
-                        for param in content_type_header.split(";"):
-                            param = param.strip()
-
-                            if param.startswith("boundary="):
-                                boundary = param[9:].strip('"')
-
-                        if boundary:
-                            form_data, files = _parse_multipart(raw_body, boundary)
-
-                    else:
-                        form_data = _parse_form_data(raw_body.decode("utf-8", "replace"))
-
-            # Routes take precedence
-            self._log("websrv: checking route for path:", path, "available routes:", list(self.routes.keys()))
-            route_handler = self._get_route(path)
-
-            if route_handler:
-                self._log("websrv: routing to", path)
-                try:
-                    request = Request(
-                        method=method,
-                        path=path,
-                        query=query,
-                        raw_path=raw_path,
-                        headers=headers,
-                        body=raw_body,
-                        form_data=form_data,
-                        files=files,
-                    )
-                    if isinstance(route_handler, type) and issubclass(route_handler, View):
-                        response = route_handler().dispatch(request)
-                    elif isinstance(route_handler, View):
-                        response = route_handler.dispatch(request)
-                    else:
-                        response = route_handler(request)
-
-                    return self._send_result(cl_sock, response)
-                except Exception as e:
-                    self._log("websrv: route handler exception:", e)
-                    return self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
-
-            # POST to an unmatched route is a 404
-            if method == "POST":
-                return self._send_response(cl_sock, 404, "Not Found", b"Not Found", "text/plain")
-
-            # No route matched — fall back to static file handling
-            if path == "/" or path == "/index.html":
-                content, content_type = self._load_index()
-                if content is None:
-                    self._log("websrv: no index found, returning default page")
-                    content = b"<html><body><h1>OK</h1></body></html>"
-                    content_type = "text/html"
-            else:
-                safe_path = path.lstrip("/")
-                file_path = "/".join((self.www_dir, safe_path))
-                if self._file_exists(file_path):
-                    self._log("websrv: serving file", file_path)
-                    content_type = self._guess_mime(file_path)
-                    return self._send_file_static(cl_sock, file_path, content_type)
                 else:
-                    self._log("websrv: file not found", file_path)
-                    return self._send_response(cl_sock, 404, "Not Found", b"Not Found", "text/plain")
+                    if path == "/" or path == "/index.html":
+                        content, content_type = self._load_index()
+                        if content is None:
+                            self._log("websrv: no index found, returning default page")
+                            content = b"<html><body><h1>OK</h1></body></html>"
+                            content_type = "text/html"
+                        self._send_response(cl_sock, 200, "OK", content, content_type, keep_alive=keep_alive)
+                    else:
+                        safe_path = path.lstrip("/")
+                        file_path = "/".join((self.www_dir, safe_path))
+                        if self._file_exists(file_path):
+                            self._log("websrv: serving file", file_path)
+                            content_type = self._guess_mime(file_path)
+                            self._send_file_static(cl_sock, file_path, content_type, keep_alive=keep_alive)
+                        else:
+                            self._log("websrv: file not found", file_path)
+                            self._send_response(cl_sock, 404, "Not Found", b"Not Found", "text/plain")
+                            break
 
-            return self._send_response(cl_sock, 200, "OK", content, content_type)
+                if not keep_alive:
+                    break
+
         except Exception as e:
             self._log("websrv: handler exception:", e)
             try:
@@ -974,12 +997,14 @@ class WebServer:
     def _guess_mime(self, filename):
         """Return a MIME type for *filename* based on its extension."""
 
-        for ext, mime in self._MIME.items():
-            if filename.endswith(ext):
-                return mime
+        dot = filename.rfind(".")
+        if dot != -1:
+            return self._MIME.get(filename[dot:], "application/octet-stream")
         return "application/octet-stream"
 
-    def _send_response(self, cl_sock, status_code, reason, content, content_type="text/html", extra_headers=None):
+    def _send_response(
+        self, cl_sock, status_code, reason, content, content_type="text/html", extra_headers=None, keep_alive=False
+    ):
         """Send an HTTP response to the client socket."""
 
         try:
@@ -987,8 +1012,8 @@ class WebServer:
                 body_bytes = content.encode("utf-8")
             else:
                 body_bytes = content or b""
-            header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}".format(
-                status_code, reason, content_type, len(body_bytes)
+            header = "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}".format(
+                status_code, reason, content_type, len(body_bytes), "keep-alive" if keep_alive else "close"
             )
             if extra_headers:
                 for key, value in extra_headers.items():
@@ -1000,10 +1025,10 @@ class WebServer:
         except Exception:
             pass
 
-    def _send_file_static(self, cl_sock, file_path: str, content_type: str):
+    def _send_file_static(self, cl_sock, file_path: str, content_type: str, keep_alive: bool = False):
         """Send a static file from the www directory with caching headers.
 
-        Streams in 1KB chunks and includes Cache-Control and ETag headers.
+        Streams in 4KB chunks and includes Cache-Control and ETag headers.
         Does not delete the file after sending (unlike _send_file).
         """
 
@@ -1014,12 +1039,12 @@ class WebServer:
 
             etag = '"{}-{}"'.format(file_size, file_mtime)
 
-            header = "HTTP/1.0 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=2592000\r\nETag: {}\r\n\r\n".format(
-                content_type, file_size, etag
+            header = "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=2592000\r\nETag: {}\r\nConnection: {}\r\n\r\n".format(
+                content_type, file_size, etag, "keep-alive" if keep_alive else "close"
             )
             cl_sock.send(header.encode("utf-8"))
 
-            chunk_size = 1024
+            chunk_size = 4096
             with open(file_path, "rb") as f:
                 while True:
                     chunk = f.read(chunk_size)
@@ -1053,8 +1078,8 @@ class WebServer:
             )
             cl_sock.send(header.encode("utf-8"))
 
-            # Stream file in 1KB chunks
-            chunk_size = 1024
+            # Stream file in 4KB chunks
+            chunk_size = 4096
             try:
                 with open(file_path, "rb") as f:
                     while True:
@@ -1071,23 +1096,29 @@ class WebServer:
         except Exception:
             pass
 
-    def _send_result(self, cl_sock, res):
+    def _send_result(self, cl_sock, res, keep_alive: bool = False):
         """Normalise a route handler return value and send it as a response."""
 
         if res is None:
-            return self._send_response(cl_sock, 204, "No Content", b"", "text/plain")
+            return self._send_response(cl_sock, 204, "No Content", b"", "text/plain", keep_alive=keep_alive)
         if isinstance(res, FileResponse):
             return self._send_file(cl_sock, res.file_path, res.status, res.reason, res.content_type)
         if isinstance(res, Response):
             return self._send_response(
-                cl_sock, res.status, res.reason, res.to_bytes(), res.content_type, res.headers or None
+                cl_sock,
+                res.status,
+                res.reason,
+                res.to_bytes(),
+                res.content_type,
+                res.headers or None,
+                keep_alive=keep_alive,
             )
         if isinstance(res, tuple) and len(res) == 2:
-            return self._send_response(cl_sock, 200, "OK", res[0], res[1])
+            return self._send_response(cl_sock, 200, "OK", res[0], res[1], keep_alive=keep_alive)
         if isinstance(res, bytes):
-            return self._send_response(cl_sock, 200, "OK", res, "application/octet-stream")
+            return self._send_response(cl_sock, 200, "OK", res, "application/octet-stream", keep_alive=keep_alive)
         if isinstance(res, str):
-            return self._send_response(cl_sock, 200, "OK", res, "text/html")
+            return self._send_response(cl_sock, 200, "OK", res, "text/html", keep_alive=keep_alive)
         return self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
 
     def start(self):
