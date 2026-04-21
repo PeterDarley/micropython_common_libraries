@@ -909,8 +909,8 @@ class WebServer:
                 file_path = "/".join((self.www_dir, safe_path))
                 if self._file_exists(file_path):
                     self._log("websrv: serving file", file_path)
-                    content = self._readfile(file_path)
                     content_type = self._guess_mime(file_path)
+                    return self._send_file_static(cl_sock, file_path, content_type)
                 else:
                     self._log("websrv: file not found", file_path)
                     return self._send_response(cl_sock, 404, "Not Found", b"Not Found", "text/plain")
@@ -997,6 +997,36 @@ class WebServer:
             cl_sock.send(header.encode("utf-8"))
             if body_bytes:
                 cl_sock.send(body_bytes)
+        except Exception:
+            pass
+
+    def _send_file_static(self, cl_sock, file_path: str, content_type: str):
+        """Send a static file from the www directory with caching headers.
+
+        Streams in 1KB chunks and includes Cache-Control and ETag headers.
+        Does not delete the file after sending (unlike _send_file).
+        """
+
+        try:
+            stat = os.stat(file_path)
+            file_size = stat[6]
+            file_mtime = stat[8] if len(stat) > 8 else 0
+
+            etag = '"{}-{}"'.format(file_size, file_mtime)
+
+            header = "HTTP/1.0 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=2592000\r\nETag: {}\r\n\r\n".format(
+                content_type, file_size, etag
+            )
+            cl_sock.send(header.encode("utf-8"))
+
+            chunk_size = 1024
+            with open(file_path, "rb") as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    cl_sock.send(chunk)
+
         except Exception:
             pass
 
