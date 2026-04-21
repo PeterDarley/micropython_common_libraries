@@ -16,8 +16,8 @@ Settings can define either a single strip or multiple strips:
 
     # Multiple strips (new)
     NEOPIXELS = [
-        {"pin": 4, "count": 144},
-        {"pin": 12, "count": 60},
+        {"pin": 4, "count": 144, "color_order": "GRB"},
+        {"pin": 12, "count": 60},  # defaults to GRB
     ]
 
 Indices are mapped contiguously: strip 0 has indices 0-143, strip 1 has 144-203, etc.
@@ -29,6 +29,8 @@ try:
     from machine import Pin
 except Exception:
     neopixel = None
+
+_CHANNEL_INDEX = {"R": 0, "G": 1, "B": 2, "W": 3}
 
 try:
     from settings import NEOPIXELS
@@ -74,17 +76,25 @@ class LEDs:
         # Initialize all physical strips and track their offsets
         self._strips = []
         self._strip_offsets = []
+        self._strip_orders = []
+        self._strip_inverse_orders = []
         total_count = 0
 
         for config in strips_config:
             pin_num = config["pin"]
             strip_count = config["count"]
+            color_order = config.get("color_order", "GRB").upper()
 
             if isinstance(pin_num, int):
                 pin_num = Pin(pin_num)
 
+            order_indices = tuple(_CHANNEL_INDEX[c] for c in color_order)
+            inverse_indices = tuple(sorted(range(len(order_indices)), key=lambda i: order_indices[i]))
+
             self._strips.append(neopixel.NeoPixel(pin_num, strip_count))
             self._strip_offsets.append(total_count)
+            self._strip_orders.append(order_indices)
+            self._strip_inverse_orders.append(inverse_indices)
             total_count += strip_count
 
         self.count = total_count
@@ -187,6 +197,19 @@ class LEDs:
 
         return (curve_component(r), curve_component(g), curve_component(b))
 
+    @staticmethod
+    def _reorder(color: tuple, order_indices: tuple) -> tuple:
+        """Reorder RGB channels to match the physical strip's expected byte order.
+
+        Args:
+            color: RGB tuple in logical (r, g, b) order.
+            order_indices: Per-strip tuple of source channel indices.
+
+        Returns:
+            Reordered tuple ready for the NeoPixel buffer.
+        """
+        return tuple(color[i] for i in order_indices)
+
     def _scale(self, color: tuple) -> tuple:
         """Apply brightness scaling to color."""
         brightness = self._brightness
@@ -214,23 +237,28 @@ class LEDs:
             mapping = self._map_index(logical_index)
             if mapping is not None:
                 strip_idx, phys_idx = mapping
-                self._strips[strip_idx][phys_idx] = scaled
+                self._strips[strip_idx][phys_idx] = self._reorder(scaled, self._strip_orders[strip_idx])
 
     def get(self, index: int) -> tuple:
-        """Return the raw value currently staged for pixel `index` (after brightness scaling)."""
+        """Return the current color for pixel `index` as an (r, g, b) tuple.
+
+        Inverse-reorders the stored bytes back to logical RGB order.
+        """
         mapping = self._map_index(index)
         if mapping is None:
             return (0, 0, 0)
 
         strip_idx, phys_idx = mapping
-        return tuple(self._strips[strip_idx][phys_idx])
+        raw = tuple(self._strips[strip_idx][phys_idx])
+        return self._reorder(raw, self._strip_inverse_orders[strip_idx])
 
     def fill(self, color: tuple) -> None:
         """Fill all strips with `color` (r,g,b)."""
         scaled = self._scale(color)
-        for strip in self._strips:
+        for strip_idx, strip in enumerate(self._strips):
+            reordered = self._reorder(scaled, self._strip_orders[strip_idx])
             for i in range(len(strip)):
-                strip[i] = scaled
+                strip[i] = reordered
 
     def range(self, start: int, end: int, color: tuple) -> None:
         """Set pixels from `start` to `end` (exclusive) to `color` (r,g,b)."""
@@ -250,7 +278,7 @@ class LEDs:
             mapping = self._map_index(i)
             if mapping is not None:
                 strip_idx, phys_idx = mapping
-                self._strips[strip_idx][phys_idx] = color
+                self._strips[strip_idx][phys_idx] = self._reorder(color, self._strip_orders[strip_idx])
 
         self.show()
 
