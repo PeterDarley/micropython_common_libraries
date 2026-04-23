@@ -63,7 +63,10 @@ class WIFIManager:
             if not self.ssid or not self.password:
                 raise ValueError("SSID or password not provided.")
 
-            self.sta_if.connect(self.ssid, self.password)
+            # Resolve the exact broadcast SSID using a case-insensitive scan so
+            # that stored credentials with different capitalisation still connect.
+            resolved_ssid: str = self._resolve_ssid(self.ssid)
+            self.sta_if.connect(resolved_ssid, self.password)
 
             # Always start the polling timer — needed to detect connection and fire callback
             TimerManager().get_timer(callback=self.check_connection_tick, periods=[1000], cycles=90)
@@ -86,6 +89,46 @@ class WIFIManager:
         """Check if the WIFI is connected."""
 
         return self.sta_if.isconnected()
+
+    def _resolve_ssid(self, target_ssid: str) -> str:
+        """Scan visible networks and return the exact-case SSID that matches *target_ssid*.
+
+        Comparison is case-insensitive.  If no match is found (e.g. the network
+        is temporarily out of range or hidden), returns *target_ssid* unchanged
+        so the connection attempt still proceeds.
+
+        Args:
+            target_ssid: The SSID string to match, as stored in settings.
+
+        Returns:
+            The exact SSID string as broadcast by the access point, or
+            *target_ssid* if no case-insensitive match is found.
+        """
+
+        target_lower: str = target_ssid.lower()
+
+        try:
+            results = self.sta_if.scan()  # [(ssid, bssid, channel, rssi, authmode, hidden), ...]
+
+            for entry in results:
+                try:
+                    ssid_raw = entry[0]
+
+                    if isinstance(ssid_raw, bytes):
+                        scanned_ssid: str = ssid_raw.decode("utf-8", "replace").strip()
+                    else:
+                        scanned_ssid = str(ssid_raw).strip()
+
+                    if scanned_ssid.lower() == target_lower:
+                        return scanned_ssid
+
+                except Exception:
+                    continue
+
+        except Exception as error:
+            print(f"WiFi: SSID scan failed ({error}), using stored value")
+
+        return target_ssid
 
     @property
     def ip(self):

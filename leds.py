@@ -37,6 +37,52 @@ try:
 except Exception:
     NEOPIXELS = None
 
+# GPIO pin of the single onboard RGB NeoPixel on the ESP32-S3-WROOM-1 module.
+# This is fixed by the board design and does not depend on user configuration.
+ONBOARD_NEOPIXEL_PIN: int = 48
+
+
+class OnboardLED:
+    """Controls the single onboard RGB NeoPixel on GPIO 48 (ESP32-S3-WROOM-1).
+
+    This class bypasses the configured LED strips entirely and addresses the
+    board's built-in indicator pixel directly.  It works even when NEOPIXELS
+    is not configured in settings.
+    """
+
+    def __init__(self) -> None:
+        """Initialise the onboard NeoPixel driver."""
+
+        if neopixel is None:
+            self._led = None
+            return
+
+        try:
+            self._led = neopixel.NeoPixel(Pin(ONBOARD_NEOPIXEL_PIN), 1)
+        except Exception as error:
+            print("OnboardLED: failed to initialise:", error)
+            self._led = None
+
+    def set(self, r: int, g: int, b: int) -> None:
+        """Set the onboard LED to the given RGB colour (0–255 per channel).
+
+        Args:
+            r: Red channel value (0–255).
+            g: Green channel value (0–255).
+            b: Blue channel value (0–255).
+        """
+
+        if self._led is None:
+            return
+
+        self._led[0] = (r, g, b)
+        self._led.write()
+
+    def off(self) -> None:
+        """Turn the onboard LED off."""
+
+        self.set(0, 0, 0)
+
 
 class LEDs:
     _instance = None
@@ -106,17 +152,26 @@ class LEDs:
     def _parse_neopixels_config(self) -> list:
         """Parse NEOPIXELS setting into list of {pin, count} dicts.
 
-        Supports both legacy dict format and new list format.
+        Supports both the legacy single-strip dict/proxy format and a raw list
+        of strip dicts.  Uses duck-typing so that both plain dicts and the
+        ``_SettingsSection`` proxy from ``settings.py`` work correctly.
         """
         if NEOPIXELS is None:
             return []
 
         if isinstance(NEOPIXELS, list):
-            # New format: list of {pin, count} dicts
+            # Raw list of {pin, count, ...} dicts (multi-strip)
             return NEOPIXELS
-        elif isinstance(NEOPIXELS, dict):
-            # Legacy format: single {Pin, Num} dict
-            return [{"pin": NEOPIXELS["Pin"], "count": NEOPIXELS["Num"]}]
+
+        # Single-strip: either _SettingsSection proxy or a plain dict.
+        # Use duck-typing rather than isinstance so the proxy works.
+        try:
+            pin = NEOPIXELS["Pin"]
+            count = NEOPIXELS["Num"]
+            if pin is not None and count:
+                return [{"pin": pin, "count": count}]
+        except (KeyError, TypeError):
+            pass
 
         return []
 
@@ -126,10 +181,13 @@ class LEDs:
         Returns:
             True if BrightnessCurve is enabled in NEOPIXELS settings, False otherwise.
         """
-        if NEOPIXELS is None or not isinstance(NEOPIXELS, dict):
+        if NEOPIXELS is None or isinstance(NEOPIXELS, list):
             return False
 
-        return NEOPIXELS.get("BrightnessCurve", False)
+        try:
+            return bool(NEOPIXELS.get("BrightnessCurve", False))
+        except (KeyError, AttributeError):
+            return False
 
     def _map_index(self, index: int) -> tuple:
         """Map logical index to (strip_index, physical_index).
