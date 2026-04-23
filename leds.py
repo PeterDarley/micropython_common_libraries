@@ -37,6 +37,11 @@ try:
 except Exception:
     NEOPIXELS = None
 
+try:
+    from storage import PersistentDict
+except Exception:
+    PersistentDict = None
+
 # GPIO pin of the single onboard RGB NeoPixel on the ESP32-S3-WROOM-1 module.
 # This is fixed by the board design and does not depend on user configuration.
 ONBOARD_NEOPIXEL_PIN: int = 48
@@ -129,15 +134,19 @@ class LEDs:
         for config in strips_config:
             pin_num = config["pin"]
             strip_count = config["count"]
-            color_order = config.get("color_order", "GRB").upper()
+            color_order = str(config.get("color_order", "GRB")).upper()
+
+            if len(color_order) not in (3, 4) or any(channel not in _CHANNEL_INDEX for channel in color_order):
+                color_order = "GRB"
 
             if isinstance(pin_num, int):
                 pin_num = Pin(pin_num)
 
             order_indices = tuple(_CHANNEL_INDEX[c] for c in color_order)
             inverse_indices = tuple(sorted(range(len(order_indices)), key=lambda i: order_indices[i]))
+            bpp = 4 if len(color_order) == 4 else 3
 
-            self._strips.append(neopixel.NeoPixel(pin_num, strip_count))
+            self._strips.append(neopixel.NeoPixel(pin_num, strip_count, bpp=bpp))
             self._strip_offsets.append(total_count)
             self._strip_orders.append(order_indices)
             self._strip_inverse_orders.append(inverse_indices)
@@ -150,18 +159,69 @@ class LEDs:
         self._initialised = True
 
     def _parse_neopixels_config(self) -> list:
-        """Parse NEOPIXELS setting into list of {pin, count} dicts.
+        """Parse configured strips into normalized ``{pin, count, color_order, brightness_curve}`` dicts.
 
         Supports both the legacy single-strip dict/proxy format and a raw list
-        of strip dicts.  Uses duck-typing so that both plain dicts and the
-        ``_SettingsSection`` proxy from ``settings.py`` work correctly.
+        of strip dicts from persistent storage.  Uses duck-typing so that plain
+        dicts, lists, and the ``_SettingsSection`` proxy from ``settings.py``
+        are all supported.
         """
+
+        def _normalise_list(raw_list: list) -> list:
+            """Normalize list entries so both ``count`` and ``num`` are accepted."""
+
+            strips: list = []
+            for item in raw_list:
+                if not isinstance(item, dict):
+                    continue
+
+                pin_value = item.get("pin")
+                count_value = item.get("count", item.get("num"))
+                if pin_value is None or count_value in (None, 0):
+                    continue
+
+                strips.append(
+                    {
+                        "pin": pin_value,
+                        "count": int(count_value),
+                        "color_order": str(item.get("color_order", "GRB")).upper(),
+                        "brightness_curve": bool(item.get("brightness_curve", True)),
+                    }
+                )
+
+            return strips
+
         if NEOPIXELS is None:
             return []
 
+        # Preferred source: persistent storage (new format uses list under
+        # system_settings.neopixels with keys pin/num/color_order).
+        if PersistentDict is not None:
+            try:
+                stored_neopixels = PersistentDict().get("system_settings", {}).get("neopixels")
+                if isinstance(stored_neopixels, list):
+                    normalized = _normalise_list(stored_neopixels)
+                    if normalized:
+                        return normalized
+
+                if isinstance(stored_neopixels, dict):
+                    count_value = stored_neopixels.get("count", stored_neopixels.get("num"))
+                    if stored_neopixels.get("pin") is not None and count_value:
+                        return [
+                            {
+                                "pin": stored_neopixels.get("pin"),
+                                "count": int(count_value),
+                                "color_order": str(stored_neopixels.get("color_order", "GRB")).upper(),
+                                "brightness_curve": bool(stored_neopixels.get("brightness_curve", True)),
+                            }
+                        ]
+            except Exception:
+                pass
+
         if isinstance(NEOPIXELS, list):
-            # Raw list of {pin, count, ...} dicts (multi-strip)
-            return NEOPIXELS
+            normalized = _normalise_list(NEOPIXELS)
+            if normalized:
+                return normalized
 
         # Single-strip: either _SettingsSection proxy or a plain dict.
         # Use duck-typing rather than isinstance so the proxy works.
@@ -169,7 +229,14 @@ class LEDs:
             pin = NEOPIXELS["Pin"]
             count = NEOPIXELS["Num"]
             if pin is not None and count:
-                return [{"pin": pin, "count": count}]
+                return [
+                    {
+                        "pin": pin,
+                        "count": int(count),
+                        "color_order": str(NEOPIXELS.get("ColorOrder", "GRB")).upper(),
+                        "brightness_curve": bool(NEOPIXELS.get("BrightnessCurve", False)),
+                    }
+                ]
         except (KeyError, TypeError):
             pass
 
@@ -181,6 +248,10 @@ class LEDs:
         Returns:
             True if BrightnessCurve is enabled in NEOPIXELS settings, False otherwise.
         """
+        strips_config = self._parse_neopixels_config()
+        if strips_config:
+            return any(bool(strip.get("brightness_curve", False)) for strip in strips_config)
+
         if NEOPIXELS is None or isinstance(NEOPIXELS, list):
             return False
 
@@ -266,7 +337,9 @@ class LEDs:
         Returns:
             Reordered tuple ready for the NeoPixel buffer.
         """
-        return tuple(color[i] for i in order_indices)
+        required_channels = max(order_indices) + 1 if order_indices else len(color)
+        source = tuple(color) + (0,) * max(0, required_channels - len(color))
+        return tuple(source[i] for i in order_indices)
 
     def _scale(self, color: tuple) -> tuple:
         """Apply brightness scaling to color."""
@@ -308,7 +381,11 @@ class LEDs:
 
         strip_idx, phys_idx = mapping
         raw = tuple(self._strips[strip_idx][phys_idx])
-        return self._reorder(raw, self._strip_inverse_orders[strip_idx])
+        logical = self._reorder(raw, self._strip_inverse_orders[strip_idx])
+        if len(logical) >= 3:
+            return (logical[0], logical[1], logical[2])
+
+        return (0, 0, 0)
 
     def fill(self, color: tuple) -> None:
         """Fill all strips with `color` (r,g,b)."""

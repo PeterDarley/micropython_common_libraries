@@ -19,6 +19,7 @@ Serving behavior:
 import socket
 import os
 import gc
+import sys
 
 try:
     import _thread
@@ -108,7 +109,9 @@ def _parse_form_data(body_string):
     """Parse a URL-encoded form body into a dict of key->value pairs.
 
     Handles ``application/x-www-form-urlencoded`` format as sent by HTML
-    forms and HTMX.
+    forms and HTMX.  When a key appears more than once the values are
+    collected into a list; single-occurrence keys keep a plain string value
+    so that existing callers are unaffected.
     """
 
     result = {}
@@ -118,9 +121,22 @@ def _parse_form_data(body_string):
     for pair in body_string.split("&"):
         if "=" in pair:
             key, value = pair.split("=", 1)
-            result[_url_decode(key)] = _url_decode(value)
+            key = _url_decode(key)
+            value = _url_decode(value)
         elif pair:
-            result[_url_decode(pair)] = ""
+            key = _url_decode(pair)
+            value = ""
+        else:
+            continue
+
+        if key in result:
+            existing = result[key]
+            if isinstance(existing, list):
+                existing.append(value)
+            else:
+                result[key] = [existing, value]
+        else:
+            result[key] = value
 
     return result
 
@@ -908,6 +924,8 @@ class WebServer:
 
                         self._send_result(cl_sock, response, keep_alive=keep_alive)
                     except Exception as e:
+                        print("websrv: 500 error on", method, path)
+                        sys.print_exception(e)
                         self._log("websrv: route handler exception:", e)
                         self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
                         break
@@ -939,7 +957,21 @@ class WebServer:
                 if not keep_alive:
                     break
 
+        except OSError as e:
+            err_no = e.args[0] if e.args else None
+            if err_no == 116:  # ETIMEDOUT: idle keep-alive client stopped sending
+                self._log("websrv: client connection timed out")
+            else:
+                print("websrv: 500 unhandled exception")
+                sys.print_exception(e)
+                self._log("websrv: handler exception:", e)
+                try:
+                    self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
+                except Exception:
+                    pass
         except Exception as e:
+            print("websrv: 500 unhandled exception")
+            sys.print_exception(e)
             self._log("websrv: handler exception:", e)
             try:
                 self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
@@ -1119,6 +1151,7 @@ class WebServer:
             return self._send_response(cl_sock, 200, "OK", res, "application/octet-stream", keep_alive=keep_alive)
         if isinstance(res, str):
             return self._send_response(cl_sock, 200, "OK", res, "text/html", keep_alive=keep_alive)
+        print("websrv: 500 _send_result got unexpected type:", type(res))
         return self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
 
     def start(self):
