@@ -27,6 +27,26 @@ class SoundManager:
 
         self._initialised: bool = True
         self.audio_player: AudioPlayer = AudioPlayer()
+        # Perform an initial health check and keep the results available
+        try:
+            self._last_health: dict = self.audio_player.check_health()
+        except Exception:
+            self._last_health = {}
+
+    def get_last_health(self) -> dict:
+        """Return the most recent health-check results."""
+
+        return getattr(self, "_last_health", {})
+
+    def refresh_health(self) -> dict:
+        """Run a new health check and store the results."""
+
+        try:
+            self._last_health = self.audio_player.check_health()
+        except Exception:
+            self._last_health = {}
+
+        return self._last_health
 
     def get_sounds(self) -> dict:
         """Get all configured sounds.
@@ -68,12 +88,28 @@ class SoundManager:
 
         sound: dict | None = self.get_sound_by_title(title)
         if sound is None:
+            print("SoundManager: play_sound - sound not found:", title)
             raise ValueError(f"Sound '{title}' not found")
 
-        file_number: int = sound.get("file", 0)
+        file_number: int = int(sound.get("file", 0))
         high_quality: bool = bool(sound.get("high_quality", False))
 
+        # Debug: show requested play details and audio player state
+        try:
+            print(f"SoundManager: request play '{title}' -> file {file_number}, high_quality={high_quality}")
+            print("SoundManager: audio player state before play:", self.audio_player.get_playing_state())
+        except Exception:
+            # Avoid crashing when printing state in constrained environments
+            pass
+
         module_idx: int = self.audio_player.play_file(file_number, high_quality_preferred=high_quality)
+
+        try:
+            print(f"SoundManager: started '{title}' on module {module_idx}")
+            print("SoundManager: audio player state after play:", self.audio_player.get_playing_state())
+        except Exception:
+            pass
+
         return module_idx
 
     def get_playing_sounds(self) -> dict:

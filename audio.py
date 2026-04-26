@@ -101,11 +101,34 @@ class YX5200Player:
         """
 
         if self.uart is None:
+            print(f"YX5200: UART {self.uart_id} send_command - uart not initialised")
             return False
 
         try:
             frame: bytes = self._build_frame(cmd, param)
+            # Debug: show frame being written as hex
+            try:
+                hex_frame = " ".join([f"{b:02X}" for b in frame])
+                print(f"YX5200: UART {self.uart_id} sending frame: {hex_frame}")
+            except Exception:
+                pass
+
             self.uart.write(frame)
+
+            # If feedback requested, try to read a response from the module
+            try:
+                sleep(0.05)
+                resp = self.uart.read()
+                if resp:
+                    try:
+                        hex_resp = " ".join([f"{b:02X}" for b in resp])
+                        print(f"YX5200: UART {self.uart_id} response: {hex_resp}")
+                    except Exception:
+                        print(f"YX5200: UART {self.uart_id} response (raw):", resp)
+            except Exception:
+                # Non-fatal: some UART drivers may not support read() immediately
+                pass
+
             return True
         except Exception as err:
             print(f"YX5200: UART {self.uart_id} write error: {err}")
@@ -121,6 +144,7 @@ class YX5200Player:
             True if command sent successfully
         """
 
+        print(f"YX5200: UART {self.uart_id} play_file request -> {file_number}")
         success: bool = self.send_command(_CMD_PLAY_FILE, file_number)
         if success:
             self.current_file = file_number
@@ -208,6 +232,74 @@ class AudioPlayer:
 
         if not self.players:
             print("AudioPlayer: no modules configured")
+        else:
+            try:
+                infos = [
+                    {
+                        "index": i,
+                        "uart": getattr(p, "uart_id", None),
+                        "hq": getattr(p, "high_quality", False),
+                        "is_playing": getattr(p, "is_playing", False),
+                        "current_file": getattr(p, "current_file", None),
+                    }
+                    for i, p in enumerate(self.players)
+                ]
+                print("AudioPlayer: configured modules:", infos)
+            except Exception:
+                pass
+
+        # Perform a quick health check on configured modules at init/boot
+        try:
+            self.check_health()
+        except Exception:
+            # Non-fatal: ensure init continues even if health checks fail
+            pass
+
+    def check_health(self) -> dict:
+        """Check basic responsiveness of all configured players.
+
+        Sends a volume set (with feedback) to each module and reports whether
+        the module responded and its reported playback state.
+
+        Returns a dict mapping module index to a dict with keys:
+            - "ok": bool (whether the volume command succeeded)
+            - "state": playback state from `get_state()` or None
+            - "uart": uart id if available
+        """
+
+        results: dict = {}
+        for i, player in enumerate(self.players):
+            try:
+                uart_id = getattr(player, "uart_id", None)
+                # Use set_volume which issues a command and (via send_command)
+                # attempts to read a short response from the module.
+                ok = False
+                try:
+                    ok = player.set_volume(30)
+                except Exception:
+                    ok = False
+
+                # Small pause to let module update internal state
+                try:
+                    sleep(0.05)
+                except Exception:
+                    pass
+
+                state = player.get_state()
+                results[i] = {"ok": bool(ok), "state": state, "uart": uart_id}
+                print(f"AudioPlayer: health module {i} uart={uart_id} ok={ok} state={state}")
+            except Exception as err:
+                print(f"AudioPlayer: health check failed for module {i}: {err}")
+                results[i] = {"ok": False, "state": None, "uart": None}
+
+        # summary
+        try:
+            healthy = sum(1 for v in results.values() if v.get("ok"))
+            print(f"AudioPlayer: health check summary {healthy}/{len(self.players)} modules responsive")
+        except Exception:
+            pass
+
+        return results
 
     def play_file(self, file_number: int, high_quality_preferred: bool = False) -> int:
         """Play a file on an available module.
@@ -236,6 +328,13 @@ class AudioPlayer:
             module_idx: int = hq_candidates[0] if hq_candidates else candidates[0]
         else:
             module_idx = candidates[0]
+
+        # Ensure playback is audible: set module to max volume before playing
+        try:
+            self.set_volume(module_idx, 30)
+            print(f"AudioPlayer: set volume=30 on module {module_idx}")
+        except Exception:
+            pass
 
         self.players[module_idx].play_file(file_number)
         return module_idx
