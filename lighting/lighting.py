@@ -192,6 +192,23 @@ class Lighting:
 
         # self.settings_object.store()
 
+        # Ensure persistent lighting settings exist; create minimal defaults if missing.
+        if "lighting_settings" not in self.settings_object:
+            self.settings_object["lighting_settings"] = {
+                "default_scene": None,
+                "scenes": {},
+                "named_ranges": {},
+                "effects": {},
+                "filters": {},
+                "custom_colors": {},
+                "scene_settings": {},
+            }
+            try:
+                self.settings_object.store()
+            except Exception:
+                # Non-fatal: continue even if storing fails (filesystem may be unavailable)
+                pass
+
         self.settings = self.settings_object["lighting_settings"]
 
         self._active_scenes: list = []
@@ -245,18 +262,30 @@ class Lighting:
         forwarded to a registered scene function (if one exists for the scene).
         """
 
-        scenes: dict = self.settings_object["lighting_settings"]["scenes"]
+        scenes: dict = self.settings_object["lighting_settings"].get("scenes", {})
 
+        # Determine which scene to activate. If no scene is provided and there
+        # are no defined scenes, make this a no-op to avoid setting a None
+        # scene name into the active scene list (which would break joins).
         if scene_name is None:
-            if "default_scene" in self.settings_object["lighting_settings"]:
-                resolved = self.settings_object["lighting_settings"]["default_scene"]
+            default_scene = self.settings_object["lighting_settings"].get("default_scene")
+            if isinstance(default_scene, str) and default_scene in scenes:
+                resolved = default_scene
             else:
-                resolved = list(scenes.keys())[0]
-
-        elif scene_name not in scenes:
-            raise ValueError(f"Scene '{scene_name}' not found. Available scenes: {list(scenes.keys())}")
-
+                scene_keys = list(scenes.keys())
+                if scene_keys:
+                    resolved = scene_keys[0]
+                else:
+                    # No scenes defined: clear active state and return early.
+                    self._active_scenes = []
+                    self._scene_start_ticks = {}
+                    self.scene_kwargs = {}
+                    self.scene_state = {}
+                    self.retained_values = {}
+                    return
         else:
+            if scene_name not in scenes:
+                raise ValueError(f"Scene '{scene_name}' not found. Available scenes: {list(scenes.keys())}")
             resolved = scene_name
 
         # Skip if already running just this scene with no kwargs and not finished.
