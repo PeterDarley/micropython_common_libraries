@@ -56,6 +56,15 @@ class SoundManager:
         """
 
         storage: PersistentDict = PersistentDict()
+        # Prefer per-model sounds when available (new layout).
+        lighting_root = storage.get("lighting_settings", {})
+        models = lighting_root.get("models") if isinstance(lighting_root, dict) else None
+        if models:
+            current = lighting_root.get("current_model")
+            if current and isinstance(models.get(current, {}), dict):
+                return models.get(current, {}).get("sounds", {})
+
+        # Fallback to legacy top-level sounds key.
         sounds: dict = storage.get("sounds", {})
         return sounds
 

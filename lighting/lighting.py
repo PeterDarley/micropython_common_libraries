@@ -7,7 +7,6 @@ from storage import PersistentDict
 
 from lighting.colors import colors
 
-
 # Pattern metadata: defines required and optional parameters for each pattern
 PATTERN_METADATA: dict = {
     "solid": {
@@ -91,110 +90,21 @@ class Lighting:
     def __init__(self):
         self.settings_object = PersistentDict()
 
-        # self.settings_object["lighting_settings"] = {
-        #     "default_scene": "Engines",
-        #     "scenes": {
-        #         "Test Scene": {
-        #             "blink_1": {"target": 0, "pattern": "blink", "frequency": 2, "colors": ["white", "black"]},
-        #             "blink_2": {"target": "1-3", "pattern": "blink", "frequency": 1, "colors": ["red", "blue"]},
-        #             "pulse_1": {
-        #                 "target": 4,
-        #                 "pattern": "pulse",
-        #                 "frequency": 1.3,
-        #                 "duration": 1,
-        #                 "colors": ["white", "black"],
-        #             },
-        #             "fade_in_1": {
-        #                 "target": 5,
-        #                 "pattern": "fade_in",
-        #                 "duration": 120,
-        #                 "colors": ["red", "blue"],
-        #             },
-        #             "solid_1": {"pattern": "solid", "target": 6, "colors": ["purple"]},
-        #             "breath_1": {
-        #                 "target": [7, 8, 10],
-        #                 "pattern": "breathe",
-        #                 "frequency": 0.5,
-        #                 "colors": ["red", "blue"],
-        #             },
-        #         },
-        #         "Wave": {
-        #             "wave_1": {
-        #                 "pattern": "wave",
-        #                 "target": "0-14",
-        #                 "frequency": 1,
-        #                 "number": 2,
-        #                 "width": 5,
-        #                 "colors": [(0, 10, 0), "green"],
-        #             }
-        #         },
-        #         "Cylon": {
-        #             "cylon_1": {
-        #                 "pattern": "cylon",
-        #                 "target": "0-14",
-        #                 "width": 4,
-        #                 "colors": ["black", "red"],
-        #             }
-        #         },
-        #         "Dark": {"all_dark": {"pattern": "solid", "target": "all", "colors": ["black"]}},
-        #         "Flood": {
-        #             "all_flood": {
-        #                 "pattern": "solid",
-        #                 "target": "all",
-        #                 "colors": ["white"],
-        #                 "filters": [{"filter": "scintillate", "frequency": 40, "variation": 30, "heat": 20}],
-        #             }
-        #         },
-        #         "Engines": {
-        #             "top": {
-        #                 "pattern": "wave",
-        #                 "target": "0-8",
-        #                 "frequency": 1.5,
-        #                 "number": 1,
-        #                 "width": 7,
-        #                 "colors": [(0, 50, 0), (0, 200, 0)],
-        #                 "reverse": True,
-        #             },
-        #             "bottom": {
-        #                 "pattern": "wave",
-        #                 "target": "9-17",
-        #                 "frequency": 1.5,
-        #                 "number": 1,
-        #                 "width": 7,
-        #                 "colors": [(0, 50, 0), (0, 100, 0)],
-        #                 "reverse": True,
-        #             },
-        #             "front": {"pattern": "solid", "target": 18, "colors": ["green"]},
-        #             "fibers": {
-        #                 "pattern": "solid",
-        #                 "target": "19-30",
-        #                 "colors": ["white"],
-        #             },
-        #         },
-        #         "Engines2": {
-        #             "startup_1": {
-        #                 "target": "all",
-        #                 "pattern": "fade_in",
-        #                 "duration": 120,
-        #                 "colors": ["black", (50, 50, 50)],
-        #             },
-        #             # "startup_2": {
-        #             #     "target": "all",
-        #             #     "pattern": "fade_in",
-        #             #     "duration": 120,
-        #             #     "colors": [(50, 50, 50), (0, 150, 0)],
-        #             #     "initial": False,
-        #             # },
-        #         },
-        #     },
-        #     "named_ranges": {},
-        # }
+        # Small recursive copier used for migration/copy operations without importing copy.
+        def _deepcopy(obj):
+            if isinstance(obj, dict):
+                return {k: _deepcopy(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_deepcopy(v) for v in obj]
+            if isinstance(obj, tuple):
+                return tuple(_deepcopy(v) for v in obj)
+            return obj
 
-        # self.settings_object.store()
+        self._deepcopy = _deepcopy
 
-        # Ensure persistent lighting settings exist; create minimal defaults if missing.
+        # Ensure persistent lighting settings exist as a models container; migrate legacy layout if necessary.
         if "lighting_settings" not in self.settings_object:
-            self.settings_object["lighting_settings"] = {
+            default_model = {
                 "default_scene": None,
                 "scenes": {},
                 "named_ranges": {},
@@ -203,13 +113,17 @@ class Lighting:
                 "custom_colors": {},
                 "scene_settings": {},
             }
+            self.settings_object["lighting_settings"] = {
+                "models": {"Default": default_model},
+                "current_model": "Default",
+            }
             try:
                 self.settings_object.store()
             except Exception:
-                # Non-fatal: continue even if storing fails (filesystem may be unavailable)
                 pass
 
-        self.settings = self.settings_object["lighting_settings"]
+        # Load or migrate lighting settings and set `self.settings` to the active model dict.
+        self._load_lighting_root()
 
         self._active_scenes: list = []
         self._scene_start_ticks: dict = {}
@@ -223,6 +137,205 @@ class Lighting:
         self.logical_colors = [(0, 0, 0)] * self.leds.count
 
         self.animation = Animation(jobs={"lighting": self.process_tick}, stop_callbacks={"lighting": self.stop})
+
+    def _load_lighting_root(self) -> None:
+        """Load lighting settings from persistent storage and select the active model.
+
+        If an old single-model layout is detected, wrap it into a models container
+        under the name "Model" and persist the change.
+        """
+
+        lighting_root = self.settings_object.get("lighting_settings", {})
+
+        # Detect legacy single-model structure (contains scene/effect keys at top-level)
+        legacy_keys = (
+            "scenes",
+            "effects",
+            "filters",
+            "named_ranges",
+            "custom_colors",
+            "scene_settings",
+            "default_scene",
+        )
+        if "models" not in lighting_root and any(k in lighting_root for k in legacy_keys):
+            old = self._deepcopy(lighting_root)
+            new_root = {"models": {"Model": old}, "current_model": "Model"}
+            self.settings_object["lighting_settings"] = new_root
+            try:
+                self.settings_object.store()
+            except Exception:
+                pass
+            lighting_root = new_root
+
+        # Ensure a models container and choose the current model
+        models = lighting_root.get("models", {})
+        current = lighting_root.get("current_model")
+        if not current or current not in models:
+            names = list(models.keys())
+            if names:
+                current = names[0]
+                lighting_root["current_model"] = current
+            else:
+                default_model = {
+                    "default_scene": None,
+                    "scenes": {},
+                    "named_ranges": {},
+                    "effects": {},
+                    "filters": {},
+                    "custom_colors": {},
+                    "scene_settings": {},
+                }
+                lighting_root = {"models": {"Default": default_model}, "current_model": "Default"}
+                self.settings_object["lighting_settings"] = lighting_root
+                try:
+                    self.settings_object.store()
+                except Exception:
+                    pass
+
+        self._lighting_root = lighting_root
+        self.current_model_name = lighting_root.get("current_model")
+        self.settings = self._lighting_root.setdefault("models", {}).setdefault(self.current_model_name, {})
+
+    # diagnostics removed
+
+    def get_model_names(self) -> list:
+        """Return a sorted list of available model names."""
+
+        return sorted(list(self._lighting_root.get("models", {}).keys()))
+
+    def set_current_model(self, model_name: str) -> None:
+        """Set the current model and persist the change."""
+
+        models = self._lighting_root.get("models", {})
+        if model_name not in models:
+            raise ValueError(f"Model '{model_name}' not found.")
+        self._lighting_root["current_model"] = model_name
+        self.current_model_name = model_name
+        self.settings = models[model_name]
+        try:
+            self.settings_object.store()
+        except Exception:
+            pass
+
+    def create_model(self, model_name: str, copy_from_current: bool = False) -> None:
+        """Create a new minimal model.
+
+        By default this creates an empty model suitable for UI-managed creation.
+        Passing `copy_from_current=True` will copy configuration keys from the
+        active model (use sparingly).
+        """
+
+        models = self._lighting_root.setdefault("models", {})
+        if model_name in models:
+            raise ValueError(f"Model '{model_name}' already exists.")
+
+        if copy_from_current:
+            # Copy only known configuration keys to avoid copying runtime
+            # objects or cyclic references that may exist in the live
+            # settings dict.
+            allowed_keys = [
+                "default_scene",
+                "scenes",
+                "named_ranges",
+                "effects",
+                "filters",
+                "custom_colors",
+                "scene_settings",
+            ]
+
+            new_model = {}
+            for key in allowed_keys:
+                if key in self.settings:
+                    try:
+                        new_model[key] = self._deepcopy(self.settings[key])
+                    except Exception:
+                        # Fall back to a shallow copy for this key
+                        val = self.settings[key]
+                        if isinstance(val, dict):
+                            new_model[key] = {k: v for k, v in val.items()}
+                        elif isinstance(val, list):
+                            new_model[key] = list(val)
+                        else:
+                            new_model[key] = val
+                else:
+                    if key == "default_scene":
+                        new_model[key] = None
+                    else:
+                        new_model[key] = {}
+
+            models[model_name] = new_model
+        else:
+            models[model_name] = {
+                "default_scene": None,
+                "scenes": {},
+                "named_ranges": {},
+                "effects": {},
+                "filters": {},
+                "custom_colors": {},
+                "scene_settings": {},
+            }
+
+        # Persist change
+        self.settings_object.store()
+
+    def delete_model(self, model_name: str) -> None:
+        """Delete a model (cannot delete the active one)."""
+
+        if model_name == self.current_model_name:
+            raise ValueError("Cannot delete the currently active model.")
+        models = self._lighting_root.get("models", {})
+        if model_name in models:
+            del models[model_name]
+            try:
+                self.settings_object.store()
+            except Exception:
+                pass
+
+    def rename_model(self, old_name: str, new_name: str) -> None:
+        """Rename a model. Updates current_model and active settings if needed.
+
+        Raises ValueError if the old name does not exist or the new name already exists.
+        """
+
+        models = self._lighting_root.get("models", {})
+        if old_name not in models:
+            raise ValueError(f"Model '{old_name}' not found.")
+        if new_name in models:
+            raise ValueError(f"Model '{new_name}' already exists.")
+
+        models[new_name] = models.pop(old_name)
+
+        # If the renamed model was the current model, update the pointer and settings
+        if self.current_model_name == old_name:
+            self._lighting_root["current_model"] = new_name
+            self.current_model_name = new_name
+            self.settings = models[new_name]
+
+        try:
+            self.settings_object.store()
+        except Exception:
+            pass
+
+    def wrap_current_settings_into_model(self, model_name: str = "Model") -> None:
+        """Wrap legacy top-level lighting settings into a models container.
+
+        Raises ValueError if lighting_settings already contains models.
+        """
+
+        root = self.settings_object.get("lighting_settings", {})
+        if "models" in root:
+            raise ValueError("lighting_settings already contains models; cannot wrap.")
+        old = self._deepcopy(root)
+        new_root = {"models": {model_name: old}, "current_model": model_name}
+        self.settings_object["lighting_settings"] = new_root
+        try:
+            self.settings_object.store()
+        except Exception:
+            pass
+        self._load_lighting_root()
+
+    def __repr__(self) -> str:
+        return f"<Lighting current_model={self.current_model_name}>"
 
     @property
     def scene_name(self) -> str:
@@ -262,13 +375,13 @@ class Lighting:
         forwarded to a registered scene function (if one exists for the scene).
         """
 
-        scenes: dict = self.settings_object["lighting_settings"].get("scenes", {})
+        scenes: dict = self.settings.get("scenes", {})
 
         # Determine which scene to activate. If no scene is provided and there
         # are no defined scenes, make this a no-op to avoid setting a None
         # scene name into the active scene list (which would break joins).
         if scene_name is None:
-            default_scene = self.settings_object["lighting_settings"].get("default_scene")
+            default_scene = self.settings.get("default_scene")
             if isinstance(default_scene, str) and default_scene in scenes:
                 resolved = default_scene
             else:
@@ -316,7 +429,7 @@ class Lighting:
         scene_settings, those scenes are removed before this one is added.
         """
 
-        scenes: dict = self.settings_object["lighting_settings"]["scenes"]
+        scenes: dict = self.settings.get("scenes", {})
         if scene_name not in scenes:
             raise ValueError(f"Scene '{scene_name}' not found.")
 
@@ -584,49 +697,72 @@ class Lighting:
 
         return input
 
-    def get_targets(self, target) -> list[int]:
+    def get_targets(self, target, _visited=None):
         """Return a list of target indices for the given target specification.
 
-        Supports:
-        - int: single LED index
-        - list: list of indices
-        - "0-14": range notation (inclusive)
-        - "all": all LEDs
-        - "named:range_name": look up range in named_ranges
+        Supports nested named ranges and will avoid infinite recursion by
+        tracking visited named-range names.
         """
 
+        if _visited is None:
+            _visited = set()
+
+        result = []
+        seen = set()
+
+        def _append_unique(val):
+            if val not in seen:
+                seen.add(val)
+                result.append(val)
+
         if isinstance(target, int):
-            return [target]
+            _append_unique(target)
+            return result
 
-        elif isinstance(target, list):
-            return target
+        if isinstance(target, list):
+            for item in target:
+                for t in self.get_targets(item, _visited):
+                    _append_unique(t)
+            return result
 
-        elif isinstance(target, str):
+        if isinstance(target, str):
             # Check for named range reference
             if target.startswith("named:"):
-                range_name = target[6:]  # Strip "named:" prefix
+                range_name = target[6:]
+                if range_name in _visited:
+                    return []
                 named_ranges = self.settings.get("named_ranges", {})
                 if range_name in named_ranges:
+                    new_visited = set(_visited)
+                    new_visited.add(range_name)
                     named_target = named_ranges[range_name]
-                    # Recursively resolve the named target (could be a range, list, or "all")
-                    return self.get_targets(named_target)
+                    for t in self.get_targets(named_target, new_visited):
+                        _append_unique(t)
+                    return result
                 return []
 
             # Check for range notation (e.g., "0-14")
-            elif "-" in target:
-                start, end = map(int, target.split("-"))
-                return list(range(start, end + 1))
+            if "-" in target:
+                try:
+                    start, end = map(int, target.split("-"))
+                except Exception:
+                    return []
+                for i in range(start, end + 1):
+                    _append_unique(i)
+                return result
 
             # Check for "all"
-            elif target == "all":
-                return list(range(self.leds.count))
+            if target == "all":
+                for i in range(self.leds.count):
+                    _append_unique(i)
+                return result
 
             # Plain integer string (e.g., "10" from a web form)
-            else:
-                try:
-                    return [int(target)]
-                except ValueError:
-                    return []
+            try:
+                _append_unique(int(target))
+                return result
+            except Exception:
+                return []
 
         return []
 
@@ -1070,7 +1206,7 @@ class Lighting:
         """
 
         count = 0
-        lighting_settings = self.settings_object["lighting_settings"]
+        lighting_settings = self.settings
 
         def _convert_entry(entry: dict) -> None:
             """Convert a single effect/entry dict in-place."""
