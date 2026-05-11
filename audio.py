@@ -8,7 +8,6 @@ from machine import UART  # type: ignore
 from time import sleep, time
 from storage import PersistentDict
 
-
 # DFPlayer protocol constants
 _BAUD_RATE: int = 9600
 _FRAME_START: int = 0x7E
@@ -47,7 +46,7 @@ class YX5200Player:
 
         try:
             self.uart: UART = UART(uart_id, baudrate=_BAUD_RATE, tx=tx_pin, rx=rx_pin, bits=8, stop=1)
-        except Exception as err:
+        except (AttributeError, OSError, TypeError, ValueError) as err:
             print(f"YX5200: UART {uart_id} init error: {err}")
             self.uart = None
 
@@ -110,7 +109,7 @@ class YX5200Player:
             try:
                 hex_frame = " ".join([f"{b:02X}" for b in frame])
                 print(f"YX5200: UART {self.uart_id} sending frame: {hex_frame}")
-            except Exception:
+            except (TypeError, ValueError):
                 pass
 
             self.uart.write(frame)
@@ -123,14 +122,14 @@ class YX5200Player:
                     try:
                         hex_resp = " ".join([f"{b:02X}" for b in resp])
                         print(f"YX5200: UART {self.uart_id} response: {hex_resp}")
-                    except Exception:
+                    except (TypeError, ValueError):
                         print(f"YX5200: UART {self.uart_id} response (raw):", resp)
-            except Exception:
+            except (AttributeError, OSError) as err:
                 # Non-fatal: some UART drivers may not support read() immediately
-                pass
+                print(f"YX5200: UART {self.uart_id} response read error: {err}")
 
             return True
-        except Exception as err:
+        except (AttributeError, OSError, TypeError, ValueError) as err:
             print(f"YX5200: UART {self.uart_id} write error: {err}")
             return False
 
@@ -197,7 +196,7 @@ class YX5200Player:
 class AudioPlayer:
     """Manages 0-3 YX5200 MP3 player modules."""
 
-    def __new__(cls):
+    def __new__(cls) -> "AudioPlayer":
         """Implement singleton pattern."""
 
         if not hasattr(cls, "_instance"):
@@ -245,15 +244,15 @@ class AudioPlayer:
                     for i, p in enumerate(self.players)
                 ]
                 print("AudioPlayer: configured modules:", infos)
-            except Exception:
-                pass
+            except (AttributeError, TypeError) as error:
+                print(f"AudioPlayer: module info collection failed: {error}")
 
         # Perform a quick health check on configured modules at init/boot
         try:
             self.check_health()
-        except Exception:
+        except (AttributeError, OSError, TypeError, ValueError) as error:
             # Non-fatal: ensure init continues even if health checks fail
-            pass
+            print(f"AudioPlayer: initial health check failed: {error}")
 
     def check_health(self) -> dict:
         """Check basic responsiveness of all configured players.
@@ -276,19 +275,16 @@ class AudioPlayer:
                 ok = False
                 try:
                     ok = player.set_volume(30)
-                except Exception:
+                except (AttributeError, OSError, TypeError, ValueError):
                     ok = False
 
                 # Small pause to let module update internal state
-                try:
-                    sleep(0.05)
-                except Exception:
-                    pass
+                sleep(0.05)
 
                 state = player.get_state()
                 results[i] = {"ok": bool(ok), "state": state, "uart": uart_id}
                 print(f"AudioPlayer: health module {i} uart={uart_id} ok={ok} state={state}")
-            except Exception as err:
+            except (AttributeError, OSError, TypeError, ValueError) as err:
                 print(f"AudioPlayer: health check failed for module {i}: {err}")
                 results[i] = {"ok": False, "state": None, "uart": None}
 
@@ -296,8 +292,8 @@ class AudioPlayer:
         try:
             healthy = sum(1 for v in results.values() if v.get("ok"))
             print(f"AudioPlayer: health check summary {healthy}/{len(self.players)} modules responsive")
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError) as error:
+            print(f"AudioPlayer: health summary failed: {error}")
 
         return results
 
@@ -333,8 +329,8 @@ class AudioPlayer:
         try:
             self.set_volume(module_idx, 30)
             print(f"AudioPlayer: set volume=30 on module {module_idx}")
-        except Exception:
-            pass
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            print(f"AudioPlayer: failed to set volume on module {module_idx}: {error}")
 
         self.players[module_idx].play_file(file_number)
         return module_idx

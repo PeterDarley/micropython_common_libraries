@@ -85,7 +85,7 @@ class WIFIManager:
                     print(f"WiFi: connected in {time() - start:.1f}s")
 
     @property
-    def is_connected(self):
+    def is_connected(self) -> bool:
         """Check if the WIFI is connected."""
 
         return self.sta_if.isconnected()
@@ -122,26 +122,26 @@ class WIFIManager:
                     if scanned_ssid.lower() == target_lower:
                         return scanned_ssid
 
-                except Exception:
+                except (IndexError, TypeError, UnicodeError, ValueError):
                     continue
 
-        except Exception as error:
+        except OSError as error:
             print(f"WiFi: SSID scan failed ({error}), using stored value")
 
         return target_ssid
 
     @property
-    def ip(self):
+    def ip(self) -> str:
         """Return the IP address."""
 
         return self.sta_if.ifconfig()[0]
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Return the WIFI status."""
 
         return f"IP: {self.ip}, Connected: {self.is_connected}"
 
-    def check_connection_tick(self, timer):
+    def check_connection_tick(self, timer) -> None:
         """Check the WIFI connection repeatedly until it's up, or our counter reaches zero."""
 
         if self.is_connected:
@@ -152,18 +152,19 @@ class WIFIManager:
             if hasattr(self, "connect_callback") and self.connect_callback:
                 try:
                     micropython.schedule(self._run_connect_callback, 0)
-                except Exception:
+                except RuntimeError:
                     # fallback to direct call
                     try:
                         self.connect_callback()
-                    except Exception:
+                    except (AttributeError, TypeError) as error:
+                        print(f"WiFi: connect callback failed: {error}")
                         pass
 
-    def _run_connect_callback(self, _):
+    def _run_connect_callback(self, _) -> None:
         try:
             self.connect_callback()
-        except Exception:
-            pass
+        except (AttributeError, TypeError) as error:
+            print(f"WiFi: scheduled connect callback failed: {error}")
 
 
 class LEDManager:
@@ -186,33 +187,33 @@ class LEDManager:
             self.blink_count: int = 0
             self.timer: Timer = None
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Return the LED status."""
 
         return f"LED is {'on' if self.led.value() else 'off'}"
 
     @property
-    def value(self):
+    def value(self) -> int:
         """Return the LED value."""
 
         return self.led.value()
 
-    def on(self):
+    def on(self) -> None:
         """Turn the LED on."""
 
         self.led.on()
 
-    def off(self):
+    def off(self) -> None:
         """Turn the LED off."""
 
         self.led.off()
 
-    def toggle(self):
+    def toggle(self) -> None:
         """Toggle the LED."""
 
         self.led.value(not self.led.value())
 
-    def blink(self, *, times: int = 5, on_period: int = 250, off_period: int = 125):
+    def blink(self, *, times: int = 5, on_period: int = 250, off_period: int = 125) -> bool:
         """Blink the LED."""
 
         cycles = times * 2 - 1
@@ -227,18 +228,18 @@ class LEDManager:
 
         return True
 
-    def blink_tick(self, _):
+    def blink_tick(self, _) -> None:
         """Blink the LED."""
 
         self.toggle()
 
-    def blink_end(self, _):
+    def blink_end(self, _) -> None:
         """End the blinking."""
 
         self.blinking = False
         self.timer = None
 
-    def blink_stop(self):
+    def blink_stop(self) -> None:
         """Stop the blinking."""
 
         self.off()
@@ -406,7 +407,7 @@ class I2CManager:
 
             yield False
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Return the I2C status."""
 
         return f"I2C devices: " + ", ".join([f"{device.name} at {device.address}" for device in self.devices.values()])

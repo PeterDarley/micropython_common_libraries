@@ -18,7 +18,7 @@ PATTERN_METADATA: dict = {
     "blink": {
         "description": "Blinking color",
         "required": ["target", "colors"],
-        "optional": ["duration"],
+        "optional": ["duration", "frequency"],
         "color_count": 2,
     },
     "pulse": {
@@ -138,6 +138,14 @@ class Lighting:
 
         self.animation = Animation(jobs={"lighting": self.process_tick}, stop_callbacks={"lighting": self.stop})
 
+    def _store_settings(self) -> None:
+        """Persist lighting settings and log storage failures."""
+
+        try:
+            self.settings_object.store()
+        except (OSError, ValueError, TypeError) as error:
+            print(f"lighting: failed to store settings: {error}")
+
     def _load_lighting_root(self) -> None:
         """Load lighting settings from persistent storage and select the active model.
 
@@ -161,10 +169,7 @@ class Lighting:
             old = self._deepcopy(lighting_root)
             new_root = {"models": {"Model": old}, "current_model": "Model"}
             self.settings_object["lighting_settings"] = new_root
-            try:
-                self.settings_object.store()
-            except Exception:
-                pass
+            self._store_settings()
             lighting_root = new_root
 
         # Ensure a models container and choose the current model
@@ -187,10 +192,7 @@ class Lighting:
                 }
                 lighting_root = {"models": {"Default": default_model}, "current_model": "Default"}
                 self.settings_object["lighting_settings"] = lighting_root
-                try:
-                    self.settings_object.store()
-                except Exception:
-                    pass
+                self._store_settings()
 
         self._lighting_root = lighting_root
         self.current_model_name = lighting_root.get("current_model")
@@ -212,10 +214,11 @@ class Lighting:
         self._lighting_root["current_model"] = model_name
         self.current_model_name = model_name
         self.settings = models[model_name]
-        try:
-            self.settings_object.store()
-        except Exception:
-            pass
+        self._store_settings()
+
+        # After switching models, activate the new model's default scene (or
+        # first defined scene) so runtime state matches the selected model.
+        self.set_scene(None)
 
     def create_model(self, model_name: str, copy_from_current: bool = False) -> None:
         """Create a new minimal model.
@@ -246,17 +249,7 @@ class Lighting:
             new_model = {}
             for key in allowed_keys:
                 if key in self.settings:
-                    try:
-                        new_model[key] = self._deepcopy(self.settings[key])
-                    except Exception:
-                        # Fall back to a shallow copy for this key
-                        val = self.settings[key]
-                        if isinstance(val, dict):
-                            new_model[key] = {k: v for k, v in val.items()}
-                        elif isinstance(val, list):
-                            new_model[key] = list(val)
-                        else:
-                            new_model[key] = val
+                    new_model[key] = self._deepcopy(self.settings[key])
                 else:
                     if key == "default_scene":
                         new_model[key] = None
@@ -276,7 +269,7 @@ class Lighting:
             }
 
         # Persist change
-        self.settings_object.store()
+        self._store_settings()
 
     def delete_model(self, model_name: str) -> None:
         """Delete a model (cannot delete the active one)."""
@@ -286,10 +279,7 @@ class Lighting:
         models = self._lighting_root.get("models", {})
         if model_name in models:
             del models[model_name]
-            try:
-                self.settings_object.store()
-            except Exception:
-                pass
+            self._store_settings()
 
     def rename_model(self, old_name: str, new_name: str) -> None:
         """Rename a model. Updates current_model and active settings if needed.
@@ -311,10 +301,7 @@ class Lighting:
             self.current_model_name = new_name
             self.settings = models[new_name]
 
-        try:
-            self.settings_object.store()
-        except Exception:
-            pass
+        self._store_settings()
 
     def wrap_current_settings_into_model(self, model_name: str = "Model") -> None:
         """Wrap legacy top-level lighting settings into a models container.
@@ -328,10 +315,7 @@ class Lighting:
         old = self._deepcopy(root)
         new_root = {"models": {model_name: old}, "current_model": model_name}
         self.settings_object["lighting_settings"] = new_root
-        try:
-            self.settings_object.store()
-        except Exception:
-            pass
+        self._store_settings()
         self._load_lighting_root()
 
     def __repr__(self) -> str:
@@ -353,12 +337,12 @@ class Lighting:
 
         return FILTER_METADATA
 
-    def add_colors(self, new_colors: dict[str, tuple[int, int, int]]):
+    def add_colors(self, new_colors: dict[str, tuple[int, int, int]]) -> None:
         """Add new named colors to the lighting system."""
 
         colors.update(new_colors)
 
-    def register_scene_function(self, scene_name: str, func) -> None:
+    def register_scene_function(self, scene_name: str, func: object) -> None:
         """Register a callable to be invoked when the named scene is activated.
 
         The function will be called as ``func(lighting=self, **kwargs)`` whenever
@@ -467,7 +451,7 @@ class Lighting:
             if key.startswith(prefix):
                 del self.retained_values[key]
 
-    def stop(self):
+    def stop(self) -> None:
         """Runs on animation stop."""
 
         self.leds.clear()
@@ -878,8 +862,20 @@ class Lighting:
 
     def pattern_blink(self, name: str, effect: dict, tick_number: int) -> list:
         """Simple blink function for a lighting effect."""
-
+        # Determine half-period (on-duration) in ticks. Backwards-compatible
+        # support: older configs may use "duration" (ticks). Newer configs
+        # can provide "frequency" (blinks per second). If both are present,
+        # "frequency" takes precedence.
         half_period = effect.get("duration", 40)
+        if "frequency" in effect:
+            try:
+                freq = float(effect.get("frequency", 0))
+                if freq > 0:
+                    # 40 ticks per second; half-period = (ticks/sec) / (2*freq)
+                    half_period = max(1, int(round(20.0 / freq)))
+            except Exception:
+                # Leave half_period as-is if parsing fails
+                pass
         effect_colors = self._get_effect_colors(effect, 2)
 
         return self.pattern_periodic(
@@ -892,7 +888,7 @@ class Lighting:
             targets=self.get_targets(effect["target"]),
         )
 
-    def pattern_pulse(self, name, effect, tick_number) -> list:
+    def pattern_pulse(self, name: str, effect: dict, tick_number: int) -> list:
         """Simple pulse function for a lighting effect."""
 
         on_ticks = effect.get("duration", 10)
@@ -910,7 +906,16 @@ class Lighting:
             targets=self.get_targets(effect["target"]),
         )
 
-    def pattern_periodic(self, name, effect, tick_number, interval, duration, colors, targets) -> list:
+    def pattern_periodic(
+        self,
+        name: str,
+        effect: dict,
+        tick_number: int,
+        interval: int,
+        duration: int,
+        colors: list,
+        targets: list,
+    ) -> list:
         """Periodic on/off function for a lighting effect."""
 
         cycle_length = duration + interval
@@ -1046,7 +1051,7 @@ class Lighting:
 
         return list(updates.values())
 
-    def pattern_wave(self, name, effect, tick_number):
+    def pattern_wave(self, name: str, effect: dict, tick_number: int) -> list:
         """Wave function: creates one or more moving comet effects across the LEDs.
 
         effect["number"] controls how many evenly-spaced peaks travel simultaneously.

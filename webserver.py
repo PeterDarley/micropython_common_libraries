@@ -25,7 +25,7 @@ try:
     import _thread
 
     _THREAD = True
-except Exception:
+except ImportError:
     _THREAD = False
 
 # Maximum allowed request body size (512 KB).
@@ -105,7 +105,7 @@ def _parse_multipart(body: bytes, boundary: str) -> tuple:
     return form_data, files
 
 
-def _parse_form_data(body_string):
+def _parse_form_data(body_string: str) -> dict:
     """Parse a URL-encoded form body into a dict of key->value pairs.
 
     Handles ``application/x-www-form-urlencoded`` format as sent by HTML
@@ -141,7 +141,7 @@ def _parse_form_data(body_string):
     return result
 
 
-def _url_decode(encoded_string):
+def _url_decode(encoded_string: str) -> str:
     """Decode a URL-encoded string (replaces %XX sequences and + with space)."""
 
     decoded = encoded_string.replace("+", " ")
@@ -163,7 +163,7 @@ def _url_decode(encoded_string):
     return result
 
 
-def _resolve_variable(expression, context):
+def _resolve_variable(expression: str, context: dict) -> str:
     """Resolve a dot-notation variable expression against a context dict.
 
     Supports ``variable``, ``variable.key`` (dict), and ``variable.index`` (list/tuple).
@@ -207,7 +207,7 @@ def _resolve_variable(expression, context):
     return "" if value is None else str(value)
 
 
-def _resolve_variable_raw(expression, context):
+def _resolve_variable_raw(expression: str, context: dict):
     """Resolve a dot-notation variable expression and return the raw Python object.
 
     Unlike ``_resolve_variable``, this does not convert the result to a string.
@@ -248,7 +248,7 @@ def _resolve_variable_raw(expression, context):
     return value
 
 
-def _evaluate_single_condition(expression, context):
+def _evaluate_single_condition(expression: str, context: dict) -> bool:
     """Evaluate a single conditional expression (no ``and``/``or``) against a context dict.
 
     Supports:
@@ -318,7 +318,7 @@ def _evaluate_single_condition(expression, context):
     return str(raw) not in ("", "0", "False", "None")
 
 
-def _evaluate_condition(expression, context):
+def _evaluate_condition(expression: str, context: dict) -> bool:
     """Evaluate a conditional expression against a context dict.
 
     Supports ``and`` and ``or`` connectives (evaluated left-to-right with
@@ -343,7 +343,7 @@ def _evaluate_condition(expression, context):
     return False
 
 
-def _apply_context(text, context):
+def _apply_context(text: str, context: dict) -> str:
     """Replace all ``{{ expression }}`` placeholders in text using context.
 
     Supports simple variable names and dot-notation (e.g. ``variable.key`` or
@@ -372,7 +372,7 @@ def _apply_context(text, context):
     return "".join(chunks)
 
 
-def _process_if_blocks(text, context):
+def _process_if_blocks(text: str, context: dict) -> str:
     """Process ``{% if expression %}...{% endif %}`` blocks in text.
 
     Supports:
@@ -467,7 +467,7 @@ def _process_if_blocks(text, context):
     return text
 
 
-def _resolve_iterable(list_name, context):
+def _resolve_iterable(list_name: str, context: dict):
     """Resolve a for-loop iterable expression to a list of items.
 
     Supports dict.items()/keys()/values(), range(n), and plain variables.
@@ -497,7 +497,7 @@ def _resolve_iterable(list_name, context):
     return context.get(list_name) if "." not in list_name else _resolve_variable_raw(list_name, context)
 
 
-def _process_for_loops(text, context, templates_dir):
+def _process_for_loops(text: str, context: dict, templates_dir: str) -> str:
     """Process ``{% for var in list %}...{% endfor %}`` blocks recursively.
 
     Handles nested for loops by recursively processing the loop body before
@@ -592,7 +592,8 @@ def _process_for_loops(text, context, templates_dir):
                     rendered_loop = "".join(rendered_chunks)
                     text = "".join((text[:start], rendered_loop, text[endfor_start + 12 :]))
 
-                except Exception:
+                except (AttributeError, KeyError, TypeError, ValueError) as error:
+                    print(f"websrv: loop render error: {error}")
                     text = "".join((text[:start], text[endfor_start + 12 :]))
             else:
                 text = "".join((text[:start], text[endfor_start + 12 :]))
@@ -607,7 +608,7 @@ def _process_for_loops(text, context, templates_dir):
 _context_processor = None
 
 
-def set_context_processor(func) -> None:
+def set_context_processor(func: object) -> None:
     """Register a global context processor callable.
 
     The callable is invoked with no arguments on every ``render_template`` call
@@ -620,7 +621,7 @@ def set_context_processor(func) -> None:
     _context_processor = func
 
 
-def render_template(template_file, context=None, templates_dir="templates"):
+def render_template(template_file: str, context: dict | None = None, templates_dir: str = "templates") -> str | None:
     """Load a template file and substitute ``{{ key }}`` placeholders.
 
     Also supports ``{% include 'filename' %}`` to include other templates
@@ -646,7 +647,8 @@ def render_template(template_file, context=None, templates_dir="templates"):
     if _context_processor is not None:
         try:
             base = _context_processor()
-        except Exception:
+        except (AttributeError, TypeError, ValueError) as error:
+            print(f"websrv: context processor error: {error}")
             base = {}
 
         if context:
@@ -661,7 +663,8 @@ def render_template(template_file, context=None, templates_dir="templates"):
     try:
         with open(tpl_path, "rb") as f:
             data = f.read()
-    except Exception:
+    except OSError as error:
+        print(f"websrv: failed to read template {tpl_path}: {error}")
         return None
 
     text = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
@@ -681,7 +684,7 @@ def render_template(template_file, context=None, templates_dir="templates"):
     return text
 
 
-def _process_includes(text, context, templates_dir):
+def _process_includes(text: str, context: dict, templates_dir: str) -> str:
     """Process ``{% include 'filename' %}`` tags in text.
 
     Loads and renders each included template with the current context,
@@ -735,16 +738,16 @@ class WebServer:
         # lock for thread-safe route access if _thread is available
         self._routes_lock = _thread.allocate_lock() if _THREAD else None
 
-    def _log(self, *args):
+    def _log(self, *args: object) -> None:
         """Print a debug message if debug mode is enabled."""
 
         if self.debug:
             try:
                 print(*args)
-            except Exception:
+            except OSError:
                 pass
 
-    def _get_route(self, path):
+    def _get_route(self, path: str):
         """Thread-safe route lookup by path.
 
         Matches routes with or without trailing slash (e.g., "/route" matches "/route/").
@@ -756,7 +759,7 @@ class WebServer:
 
         return self._lookup_route(path)
 
-    def _lookup_route(self, path):
+    def _lookup_route(self, path: str):
         """Look up a route by path, trying with/without trailing slash."""
 
         result = self.routes.get(path)
@@ -766,7 +769,7 @@ class WebServer:
         alternate = path.rstrip("/") if path.endswith("/") else path + "/"
         return self.routes.get(alternate)
 
-    def add_route(self, url, view_func):
+    def add_route(self, url: str, view_func: object) -> None:
         """Register a view function for a specific URL path."""
 
         if self._routes_lock:
@@ -775,7 +778,7 @@ class WebServer:
         else:
             self.routes[url] = view_func
 
-    def add_routes(self, routes):
+    def add_routes(self, routes) -> None:
         """Register multiple routes at once.
 
         Args:
@@ -792,10 +795,10 @@ class WebServer:
             for url, view_func in items:
                 self.routes[url] = view_func
 
-    def route(self, url):
+    def route(self, url: str):
         """Decorator variant for registering a route."""
 
-        def _decorator(fn):
+        def _decorator(fn: object) -> object:
             self.add_route(url, fn)
             return fn
 
@@ -883,13 +886,13 @@ class WebServer:
         try:
             try:
                 self._log("websrv: accepted connection from", cl_sock.getpeername())
-            except Exception:
+            except OSError:
                 pass
 
             # Idle keep-alive connections should not block the thread forever
             try:
                 cl_sock.settimeout(5.0)
-            except Exception:
+            except OSError:
                 pass
 
             while True:
@@ -967,7 +970,7 @@ class WebServer:
                 self._log("websrv: handler exception:", e)
                 try:
                     self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
-                except Exception:
+                except OSError:
                     pass
         except Exception as e:
             print("websrv: 500 unhandled exception")
@@ -975,35 +978,36 @@ class WebServer:
             self._log("websrv: handler exception:", e)
             try:
                 self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
-            except Exception:
+            except OSError:
                 pass
         finally:
             try:
                 cl_sock.close()
-            except Exception:
+            except OSError:
                 pass
             gc.collect()
 
-    def _file_exists(self, path):
+    def _file_exists(self, path: str) -> bool:
         """Return True if *path* exists on the filesystem."""
 
         try:
             os.stat(path)
             return True
-        except Exception:
+        except OSError:
             return False
 
-    def _readfile(self, path):
+    def _readfile(self, path: str) -> bytes | None:
         """Return contents of *path* as bytes, or None on error."""
 
         try:
             self._log("websrv: reading file", path)
             with open(path, "rb") as f:
                 return f.read()
-        except Exception:
+        except OSError as error:
+            self._log("websrv: file read failed", path, error)
             return None
 
-    def _load_index(self):
+    def _load_index(self) -> tuple[bytes | None, str | None]:
         """Try to load www/index.html; return (bytes, mime) or (None, None)."""
 
         idx = self.www_dir + "/index.html"
@@ -1026,7 +1030,7 @@ class WebServer:
         ".otf": "font/otf",
     }
 
-    def _guess_mime(self, filename):
+    def _guess_mime(self, filename: str) -> str:
         """Return a MIME type for *filename* based on its extension."""
 
         dot = filename.rfind(".")
@@ -1036,7 +1040,7 @@ class WebServer:
 
     def _send_response(
         self, cl_sock, status_code, reason, content, content_type="text/html", extra_headers=None, keep_alive=False
-    ):
+    ) -> None:
         """Send an HTTP response to the client socket."""
 
         try:
@@ -1054,10 +1058,10 @@ class WebServer:
             cl_sock.send(header.encode("utf-8"))
             if body_bytes:
                 cl_sock.send(body_bytes)
-        except Exception:
-            pass
+        except OSError as error:
+            self._log("websrv: send response failed", error)
 
-    def _send_file_static(self, cl_sock, file_path: str, content_type: str, keep_alive: bool = False):
+    def _send_file_static(self, cl_sock, file_path: str, content_type: str, keep_alive: bool = False) -> None:
         """Send a static file from the www directory with caching headers.
 
         Streams in 4KB chunks and includes Cache-Control and ETag headers.
@@ -1084,10 +1088,10 @@ class WebServer:
                         break
                     cl_sock.send(chunk)
 
-        except Exception:
-            pass
+        except OSError as error:
+            self._log("websrv: send static file failed", file_path, error)
 
-    def _send_file(self, cl_sock, file_path: str, status_code: int, reason: str, content_type: str):
+    def _send_file(self, cl_sock, file_path: str, status_code: int, reason: str, content_type: str) -> None:
         """Send an HTTP response streaming from a file on disk.
 
         Streams the file in 1KB chunks to avoid loading it all into memory.
@@ -1123,12 +1127,12 @@ class WebServer:
                 # Clean up the temp file
                 try:
                     os.remove(file_path)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except OSError as error:
+                    self._log("websrv: temp file cleanup failed", file_path, error)
+        except OSError as error:
+            self._log("websrv: send file failed", file_path, error)
 
-    def _send_result(self, cl_sock, res, keep_alive: bool = False):
+    def _send_result(self, cl_sock, res, keep_alive: bool = False) -> None:
         """Normalise a route handler return value and send it as a response."""
 
         if res is None:
@@ -1154,7 +1158,7 @@ class WebServer:
         print("websrv: 500 _send_result got unexpected type:", type(res))
         return self._send_response(cl_sock, 500, "Internal Server Error", b"", "text/plain")
 
-    def start(self):
+    def start(self) -> None:
         """Start the server (blocking)."""
 
         if self._running:
@@ -1209,7 +1213,7 @@ class WebServer:
                     try:
                         self._log("websrv: spawning thread for client", remote_address)
                         _thread.start_new_thread(self._handle_client, (client_socket,))
-                    except Exception as thread_error:
+                    except (OSError, RuntimeError) as thread_error:
                         self._log("websrv: failed to spawn thread, handling inline", thread_error)
                         self._handle_client(client_socket)
                 else:
@@ -1218,11 +1222,11 @@ class WebServer:
         finally:
             try:
                 server_socket.close()
-            except Exception:
+            except OSError:
                 pass
             self._running = False
 
-    def start_in_thread(self):
+    def start_in_thread(self) -> None:
         """Start the server in a background thread."""
 
         if not _THREAD:
@@ -1233,14 +1237,15 @@ class WebServer:
         self._log("websrv: starting server in background thread")
         _thread.start_new_thread(self.start, ())
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the server."""
 
         self._running = False
         try:
             if self._sock:
                 self._sock.close()
-        except Exception:
+        except OSError as error:
+            self._log("websrv: socket close failed", error)
             pass
         self._sock = None
         self._log("websrv: stop requested")
@@ -1258,7 +1263,17 @@ class Request:
         body: raw request body bytes or None.
     """
 
-    def __init__(self, method, path, query="", raw_path=None, headers=None, body=None, form_data=None, files=None):
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        query: str = "",
+        raw_path: str | None = None,
+        headers: dict | None = None,
+        body: bytes | None = None,
+        form_data: dict | None = None,
+        files: dict | None = None,
+    ) -> None:
         """Create a Request object.
 
         The server currently provides minimal parsing: method, path, query,
@@ -1292,14 +1307,21 @@ class Response:
         headers: Optional dict of extra headers.
     """
 
-    def __init__(self, status=200, reason="OK", body=b"", content_type="text/html", headers=None):
+    def __init__(
+        self,
+        status: int = 200,
+        reason: str = "OK",
+        body: bytes | str = b"",
+        content_type: str = "text/html",
+        headers: dict | None = None,
+    ) -> None:
         self.status = status
         self.reason = reason
         self.body = body
         self.content_type = content_type
         self.headers = headers or {}
 
-    def to_bytes(self):
+    def to_bytes(self) -> bytes:
         """Return the body as bytes."""
         if isinstance(self.body, bytes):
             return self.body
@@ -1307,12 +1329,12 @@ class Response:
             return self.body.encode("utf-8")
         return str(self.body).encode("utf-8")
 
-    def __str__(self):
+    def __str__(self) -> str:
         try:
             if isinstance(self.body, bytes):
                 return self.body.decode("utf-8", "replace")
             return str(self.body)
-        except Exception:
+        except (UnicodeError, TypeError, ValueError):
             return repr(self.body)
 
 
@@ -1338,7 +1360,7 @@ class FileResponse:
 class View:
     """Base class for a web server view."""
 
-    def dispatch(self, request):
+    def dispatch(self, request: Request):
         """Handle a request for this view.
 
         Args:
