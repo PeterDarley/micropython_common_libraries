@@ -880,14 +880,17 @@ class WebServer:
 
         return (method, path, query, raw_path, headers, raw_body, form_data, files, keep_alive)
 
-    def _handle_client(self, cl_sock):
+    def _handle_client(self, cl_sock, remote_address=None):
         """Handle one client connection, serving multiple requests if keep-alive."""
 
         try:
-            try:
-                self._log("websrv: accepted connection from", cl_sock.getpeername())
-            except OSError:
-                pass
+            if remote_address is not None:
+                self._log("websrv: accepted connection from", remote_address)
+            else:
+                try:
+                    self._log("websrv: accepted connection from", cl_sock.getpeername())
+                except (OSError, AttributeError):
+                    pass
 
             # Idle keep-alive connections should not block the thread forever
             try:
@@ -1212,13 +1215,13 @@ class WebServer:
                 if _THREAD:
                     try:
                         self._log("websrv: spawning thread for client", remote_address)
-                        _thread.start_new_thread(self._handle_client, (client_socket,))
+                        _thread.start_new_thread(self._handle_client, (client_socket, remote_address))
                     except (OSError, RuntimeError) as thread_error:
                         self._log("websrv: failed to spawn thread, handling inline", thread_error)
-                        self._handle_client(client_socket)
+                        self._handle_client(client_socket, remote_address)
                 else:
                     self._log("websrv: handling client inline", remote_address)
-                    self._handle_client(client_socket)
+                    self._handle_client(client_socket, remote_address)
         finally:
             try:
                 server_socket.close()

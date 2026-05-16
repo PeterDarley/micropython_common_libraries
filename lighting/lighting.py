@@ -73,6 +73,10 @@ FILTER_METADATA: dict = {
         "description": "Scintillate filter",
         "optional": ["frequency", "variation", "heat"],
     },
+    "brightness": {
+        "description": "Brightness filter",
+        "optional": ["brightness"],
+    },
 }
 
 
@@ -768,6 +772,30 @@ class Lighting:
         """Null filter: returns the LED list unaltered."""
 
         return leds
+
+    def filter_brightness(self, filter_dict: dict, leds: list, tick_number: int) -> list:
+        """Brightness filter: scale each RGB channel by a constant multiplier.
+
+        The result of each channel is clamped to the inclusive range 0..255
+        and returned as an integer.
+        """
+
+        if not leds:
+            return leds
+
+        try:
+            brightness_multiplier = float(filter_dict.get("brightness", 1.0))
+        except (TypeError, ValueError):
+            brightness_multiplier = 1.0
+
+        result = []
+        for led_index, target_color in leds:
+            new_red = max(0, min(255, int(target_color[0] * brightness_multiplier)))
+            new_green = max(0, min(255, int(target_color[1] * brightness_multiplier)))
+            new_blue = max(0, min(255, int(target_color[2] * brightness_multiplier)))
+            result.append((led_index, (new_red, new_green, new_blue)))
+
+        return result
 
     def filter_sizzle(self, filter_dict: dict, leds: list, tick_number: int) -> list:
         """Sizzle filter: applies a uniform random deviation to all LEDs.

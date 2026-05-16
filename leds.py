@@ -42,28 +42,32 @@ try:
 except Exception:
     PersistentDict = None
 
-# GPIO pin of the single onboard RGB NeoPixel on the ESP32-S3-WROOM-1 module.
-# This is fixed by the board design and does not depend on user configuration.
-ONBOARD_NEOPIXEL_PIN: int = 48
+# Default GPIO pin for an onboard RGB NeoPixel used by some ESP32 dev boards.
+# Host projects can override this by passing a pin to OnboardLED.
+DEFAULT_ONBOARD_NEOPIXEL_PIN: int = 48
 
 
 class OnboardLED:
-    """Controls the single onboard RGB NeoPixel on GPIO 48 (ESP32-S3-WROOM-1).
+    """Controls a single onboard RGB NeoPixel.
 
     This class bypasses the configured LED strips entirely and addresses the
-    board's built-in indicator pixel directly.  It works even when NEOPIXELS
+    board's built-in indicator pixel directly. It works even when NEOPIXELS
     is not configured in settings.
     """
 
-    def __init__(self) -> None:
-        """Initialise the onboard NeoPixel driver."""
+    def __init__(self, pin: int = DEFAULT_ONBOARD_NEOPIXEL_PIN) -> None:
+        """Initialise the onboard NeoPixel driver.
+
+        Args:
+            pin: GPIO pin for the onboard NeoPixel (default 48).
+        """
 
         if neopixel is None:
             self._led = None
             return
 
         try:
-            self._led = neopixel.NeoPixel(Pin(ONBOARD_NEOPIXEL_PIN), 1)
+            self._led = neopixel.NeoPixel(Pin(pin), 1)
         except Exception as error:
             print("OnboardLED: failed to initialise:", error)
             self._led = None

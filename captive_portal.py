@@ -198,7 +198,14 @@ class CaptivePortal:
         portal.start()  # does not return; resets device when done
     """
 
-    def __init__(self, ap_ssid: str = "lightmotron-setup", ap_password: str = "") -> None:
+    def __init__(
+        self,
+        ap_ssid: str = "wifi-setup",
+        ap_password: str = "",
+        portal_title: str = "WiFi Setup",
+        portal_heading: str = "Device",
+        default_hostname: str = "device",
+    ) -> None:
         """Initialise the captive portal.
 
         Args:
@@ -206,10 +213,16 @@ class CaptivePortal:
             ap_password: Password for the AP.  Empty string means open (no
                 password), which is the default so users can join without
                 any prior configuration.
+            portal_title: HTML title shown in the browser tab.
+            portal_heading: Product name shown in the setup page heading.
+            default_hostname: Hostname used when none is stored yet.
         """
 
         self._ap_ssid: str = ap_ssid
         self._ap_password: str = ap_password
+        self._portal_title: str = portal_title
+        self._portal_heading: str = portal_heading
+        self._default_hostname: str = default_hostname
         self._stop_flag: list = [False]
         self._cached_networks: list = []  # populated by _scan_networks() before AP starts
 
@@ -331,12 +344,14 @@ class CaptivePortal:
 
         options_html: str = "\n".join(options)
         safe_hostname: str = _html_escape(hostname)
+        safe_portal_title: str = _html_escape(self._portal_title)
+        safe_portal_heading: str = _html_escape(self._portal_heading)
 
         return (
             '<!DOCTYPE html><html lang="en"><head>'
             '<meta charset="UTF-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            "<title>Lightmotron Setup</title>"
+            "<title>" + safe_portal_title + "</title>"
             "<style>"
             "*,*::before,*::after{box-sizing:border-box;}"
             "body{font-family:sans-serif;background:#111;color:#eee;display:flex;justify-content:center;padding:2rem;margin:0;}"
@@ -348,7 +363,7 @@ class CaptivePortal:
             "button{margin-top:1.5rem;width:100%;padding:.75rem;background:#0d6efd;color:#fff;border:none;border-radius:4px;font-size:1rem;cursor:pointer;}"
             ".note{margin-top:1.5rem;font-size:.8rem;color:#777;border-top:1px solid #333;padding-top:1rem;}"
             '</style></head><body><div class="card">'
-            "<h1>Lightmotron &mdash; WiFi Setup</h1>"
+            "<h1>" + safe_portal_heading + " &mdash; WiFi Setup</h1>"
             "<p>Select your WiFi network and enter the password.</p>"
             '<form method="POST" action="/save" onsubmit="return onSub()">'
             '<input type="hidden" name="ssid" id="ssid">'
@@ -391,11 +406,11 @@ class CaptivePortal:
         """Return the configured mDNS hostname from persistent storage.
 
         Returns:
-            The stored hostname, or ``lightmotron`` if none is configured.
+            The stored hostname, or ``default_hostname`` if none is configured.
         """
 
         stored: str = PersistentDict().get("system_settings", {}).get("hostname", "")
-        return stored if stored else "lightmotron"
+        return stored if stored else self._default_hostname
 
     def _make_response(
         self, status_line: bytes, body: bytes, content_type: bytes = b"text/html; charset=utf-8"
