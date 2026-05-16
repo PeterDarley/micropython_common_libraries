@@ -1048,7 +1048,14 @@ class OTAUpdater:
             ".yml",
             ".yaml",
         )
-        if path.lower().endswith(text_extensions):
+        text_filenames = (
+            ".gitignore",
+            ".gitattributes",
+            ".editorconfig",
+        )
+        filename = path.rsplit("/", 1)[-1].lower()
+
+        if path.lower().endswith(text_extensions) or filename in text_filenames:
             # Normalize CRLF to LF to match repo storage format
             data = data.replace(b"\r\n", b"\n")
 
