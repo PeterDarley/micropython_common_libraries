@@ -32,6 +32,7 @@ class OTAUpdater:
         excluded_local_dirs: tuple = (),
         candidate_branches: tuple = ("main", "master"),
         user_agent: str = "ota-updater",
+        track_submodules: bool = False,
     ) -> None:
         """Initialise an updater instance.
 
@@ -45,6 +46,7 @@ class OTAUpdater:
             excluded_local_dirs: Directory names to skip during local scans.
             candidate_branches: Branch names to try in order.
             user_agent: HTTP user agent string.
+            track_submodules: If True, recursively fetch and track submodule files.
         """
 
         if not repo_owner or not repo_name:
@@ -59,6 +61,7 @@ class OTAUpdater:
         self.excluded_local_dirs: tuple = self._DEFAULT_LOCAL_EXCLUDED_DIRS + tuple(excluded_local_dirs)
         self.candidate_branches: tuple = tuple(candidate_branches) if candidate_branches else ("main", "master")
         self.user_agent: str = user_agent if user_agent else "ota-updater"
+        self.track_submodules: bool = track_submodules
 
     @property
     def repository_slug(self) -> str:
@@ -72,15 +75,53 @@ class OTAUpdater:
         remote_tree, branch_name = self._fetch_repo_tree()
 
         remote_file_map: dict = {}
+        submodules: dict = {}
+
+        # Separate regular files from submodules
         for entry in remote_tree:
+            path = entry.get("path", "")
+
+            if entry.get("type") == "commit":
+                # This is a submodule
+                if self._should_track_path(path):
+                    submodules[path] = entry.get("sha", "")
+                continue
+
             if entry.get("type") != "blob":
                 continue
 
-            path = entry.get("path", "")
             if not self._should_track_path(path):
                 continue
 
             remote_file_map[path] = entry.get("sha", "")
+
+        # Process submodules if enabled
+        if self.track_submodules and submodules:
+            gitmodules = self._fetch_gitmodules(branch_name)
+            for submodule_path, submodule_sha in submodules.items():
+                submodule_info = gitmodules.get(submodule_path, {})
+                submodule_url = submodule_info.get("url", "")
+                if not submodule_url:
+                    continue
+
+                try:
+                    submodule_owner, submodule_repo = self._parse_github_url(submodule_url)
+                    submodule_tree = self._fetch_submodule_tree(
+                        submodule_owner, submodule_repo, submodule_sha
+                    )
+
+                    for entry in submodule_tree:
+                        if entry.get("type") != "blob":
+                            continue
+
+                        file_path = submodule_path + "/" + entry.get("path", "")
+                        if not self._should_track_path(file_path):
+                            continue
+
+                        remote_file_map[file_path] = entry.get("sha", "")
+                except Exception:
+                    # Skip submodules that fail to fetch
+                    pass
 
         local_files: set = set(self._list_local_files(""))
         updates: list = []
@@ -182,6 +223,130 @@ class OTAUpdater:
             raise OSError("Unable to fetch repository tree")
 
         raise last_error
+
+    def _fetch_gitmodules(self, branch_name: str) -> dict:
+        """Fetch and parse .gitmodules file to extract submodule mappings.
+
+        Returns a dict mapping submodule paths to {url, ...} dicts.
+        """
+
+        url = (
+            self._GITHUB_RAW_BASE
+            + "/"
+            + self.repo_owner
+            + "/"
+            + self.repo_name
+            + "/"
+            + branch_name
+            + "/.gitmodules"
+        )
+
+        try:
+            status_code, response_headers, body = self._http_get(url)
+            if status_code != 200:
+                return {}
+
+            gitmodules_content = body.decode("utf-8", "replace")
+            return self._parse_gitmodules(gitmodules_content)
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _parse_gitmodules(content: str) -> dict:
+        """Parse .gitmodules INI format and return dict of submodule->config.
+
+        Example .gitmodules:
+            [submodule "lib"]
+                path = lib
+                url = https://github.com/user/lib.git
+        """
+
+        submodules: dict = {}
+        current_section: str | None = None
+
+        for line in content.split("\n"):
+            line = line.strip()
+
+            if not line or line.startswith(";") or line.startswith("#"):
+                continue
+
+            if line.startswith("[submodule"):
+                # Extract section name from [submodule "name"]
+                if '"' in line:
+                    current_section = line.split('"')[1]
+                    submodules[current_section] = {}
+                continue
+
+            if "=" in line and current_section is not None:
+                key, value = line.split("=", 1)
+                submodules[current_section][key.strip()] = value.strip()
+
+        return submodules
+
+    @staticmethod
+    def _parse_github_url(url: str) -> tuple:
+        """Extract (owner, repo) from a GitHub URL.
+
+        Handles formats:
+        - https://github.com/owner/repo.git
+        - https://github.com/owner/repo
+        - git@github.com:owner/repo.git
+        """
+
+        url = url.rstrip("/").rstrip(".git")
+
+        if "github.com/" in url:
+            # HTTPS format
+            remainder = url.split("github.com/", 1)[1]
+        elif "github.com:" in url:
+            # SSH format
+            remainder = url.split("github.com:", 1)[1]
+        else:
+            raise ValueError("Not a GitHub URL: {}".format(url))
+
+        parts = remainder.split("/")
+        if len(parts) < 2:
+            raise ValueError("Invalid GitHub URL format: {}".format(url))
+
+        return parts[0], parts[1]
+
+    def _fetch_submodule_tree(
+        self, submodule_owner: str, submodule_repo: str, commit_sha: str
+    ) -> list:
+        """Fetch the tree for a submodule at a specific commit SHA."""
+
+        url = (
+            self._GITHUB_API_BASE
+            + "/repos/"
+            + submodule_owner
+            + "/"
+            + submodule_repo
+            + "/git/trees/"
+            + commit_sha
+            + "?recursive=1"
+        )
+
+        try:
+            status_code, response_headers, body = self._http_get(url)
+            if status_code != 200:
+                raise OSError(
+                    "GitHub API returned HTTP {} for submodule {}".format(
+                        status_code, submodule_repo
+                    )
+                )
+
+            payload = json.loads(body.decode("utf-8"))
+            tree = payload.get("tree", [])
+            if not isinstance(tree, list):
+                raise ValueError("Unexpected tree payload for submodule")
+
+            return tree
+        except Exception as error:
+            raise OSError(
+                "Failed to fetch submodule tree for {}@{}: {}".format(
+                    submodule_repo, commit_sha, str(error)
+                )
+            )
 
     def _download_raw_file(self, path: str, branch_name: str) -> bytes:
         """Download one file from raw.githubusercontent.com and return bytes."""
