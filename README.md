@@ -44,18 +44,52 @@ When instantiating `OTAUpdater`, pass all project-specific rules as constructor 
 - `candidate_branches`: Branch names to try in order (defaults to `("main", "master")`)
 - `user_agent`: HTTP user agent string
 - `track_submodules`: Enable recursive fetching of git submodule files (default `False`)
+- `debug_logging`: Enable OTA debug logs to `.ota_debug.log` (default `False`)
 
 ### Submodule Support
 
+Submodule file tracking is **enabled by default**. The updater uses incremental chunked processing to handle large repository trees without exhausting memory:
+
+1. Fetches the remote tree and saves it as newline-delimited snapshot entries
+2. Scans local files and saves them as newline-delimited paths
+3. Processes snapshot entries incrementally, comparing SHAs one path at a time
+4. Detects changes to individual submodule files (not just the submodule pointer commit)
+5. Cleans up temporary files when done
+
+**How it works:**
+- **Memory efficient:** Snapshot files are processed line-by-line
+- **Stack safer:** Main repo traversal, submodule traversal, and local file discovery are iterative (non-recursive)
+- **Socket compatible:** HTTPS response parsing supports SSL sockets with or without `makefile()`
+- **Transparent:** Works automatically with no configuration changes needed
+
 When `track_submodules=True`, the updater:
+1. Fetches `.gitmodules` to discover submodule repositories
+2. Recursively fetches the tree for each submodule at its pinned commit SHA
+3. Merges submodule files into the update plan with full paths (e.g., `lib/file.py`)
+4. Includes submodule file changes in the update plan
 
-1. Detects submodule entries (type `"commit"`) in the repository tree
-2. Fetches `.gitmodules` to map submodule paths to their repository URLs
-3. Recursively fetches the tree for each submodule at its pinned commit SHA
-4. Merges submodule files into the update plan with full paths (e.g., `lib/file.py`)
-5. Compares local file SHAs against remote submodule files for change detection
+**To disable** submodule tracking (if you want to update them manually), add to persistent storage:
+```python
+"system_settings": {
+    "ota": {
+        "track_submodules": False
+    }
+}
+```
 
-**Example:** If your project has `lib/` as a git submodule and you enable `track_submodules=True`, changes to any file in the submodule will appear as updateable changes when you run `check_for_updates()`.
+### Debug Logging
+
+If update checks crash before returning an error, enable OTA diagnostics:
+
+```python
+"system_settings": {
+    "ota": {
+        "debug_logging": True
+    }
+}
+```
+
+When enabled, the updater writes stage checkpoints and memory hints to `.ota_debug.log` so you can see the last completed phase before a crash.
 
 ### File Hashing
 

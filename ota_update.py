@@ -12,6 +12,75 @@ import os
 class OTAUpdater:
     """Check and apply file updates from a configured GitHub repository."""
 
+    class _SocketStreamFallback:
+        """Provide readline/read over sockets that do not expose makefile()."""
+
+        def __init__(self, sock) -> None:
+            """Initialise fallback stream wrapper for a socket-like object."""
+
+            self.sock = sock
+            self.buffer: bytes = b""
+
+        def _recv_chunk(self, size: int = 1024) -> bytes:
+            """Receive one chunk from the underlying socket."""
+
+            try:
+                return self.sock.read(size)
+            except AttributeError:
+                return self.sock.recv(size)
+
+        def readline(self) -> bytes:
+            """Read one line ending in '\\n' or return remaining bytes at EOF."""
+
+            while True:
+                newline_index = self.buffer.find(b"\n")
+                if newline_index >= 0:
+                    line = self.buffer[: newline_index + 1]
+                    self.buffer = self.buffer[newline_index + 1 :]
+                    return line
+
+                chunk = self._recv_chunk(512)
+                if not chunk:
+                    line = self.buffer
+                    self.buffer = b""
+                    return line
+
+                self.buffer += chunk
+
+        def read(self, size: int = -1) -> bytes:
+            """Read exactly size bytes when size>=0, else read until EOF."""
+
+            if size is None or size < 0:
+                parts: list = []
+                if self.buffer:
+                    parts.append(self.buffer)
+                    self.buffer = b""
+
+                while True:
+                    chunk = self._recv_chunk(1024)
+                    if not chunk:
+                        break
+
+                    parts.append(chunk)
+
+                return b"".join(parts)
+
+            while len(self.buffer) < size:
+                chunk = self._recv_chunk(max(1, size - len(self.buffer)))
+                if not chunk:
+                    break
+
+                self.buffer += chunk
+
+            data = self.buffer[:size]
+            self.buffer = self.buffer[size:]
+            return data
+
+        def close(self) -> None:
+            """No-op close; outer socket lifecycle owns the real socket."""
+
+            return
+
     _GITHUB_API_BASE: str = "https://api.github.com"
     _GITHUB_RAW_BASE: str = "https://raw.githubusercontent.com"
 
@@ -33,6 +102,9 @@ class OTAUpdater:
         candidate_branches: tuple = ("main", "master"),
         user_agent: str = "ota-updater",
         track_submodules: bool = False,
+        debug_logging: bool = False,
+        debug_log_path: str = ".ota_debug.log",
+        debug_log_sample_every: int = 50,
     ) -> None:
         """Initialise an updater instance.
 
@@ -47,6 +119,9 @@ class OTAUpdater:
             candidate_branches: Branch names to try in order.
             user_agent: HTTP user agent string.
             track_submodules: If True, recursively fetch and track submodule files.
+            debug_logging: If True, write OTA progress diagnostics to debug_log_path.
+            debug_log_path: File path used for OTA progress diagnostics.
+            debug_log_sample_every: Emit progress logs every N processed entries.
         """
 
         if not repo_owner or not repo_name:
@@ -62,6 +137,9 @@ class OTAUpdater:
         self.candidate_branches: tuple = tuple(candidate_branches) if candidate_branches else ("main", "master")
         self.user_agent: str = user_agent if user_agent else "ota-updater"
         self.track_submodules: bool = track_submodules
+        self.debug_logging: bool = bool(debug_logging)
+        self.debug_log_path: str = debug_log_path if debug_log_path else ".ota_debug.log"
+        self.debug_log_sample_every: int = debug_log_sample_every if debug_log_sample_every > 0 else 50
 
     @property
     def repository_slug(self) -> str:
@@ -70,86 +148,294 @@ class OTAUpdater:
         return self.repo_owner + "/" + self.repo_name
 
     def check_for_updates(self) -> dict:
-        """Compare local tracked files to the remote git tree and return a plan."""
+        """Compare local tracked files to the remote git tree and return a plan.
 
-        remote_tree, branch_name = self._fetch_repo_tree()
+        Uses incremental chunked processing to minimize memory usage. Temporary
+        files are cleaned up after processing completes.
+        """
 
-        remote_file_map: dict = {}
+        state_file: str = ".ota_state.json"
+        local_files_file: str = ".ota_local_files.json"
+        self._debug_log("check_start", "repo={}".format(self.repository_slug))
+
+        try:
+            # Fetch remote tree and commit hash (two API calls total).
+            branch_name, tree_entries, commit_sha = self._fetch_repo_tree()
+            self._debug_log("branch_resolved", branch_name)
+            self._debug_log("commit_resolved", commit_sha)
+            self._save_tree_snapshot_from_entries(tree_entries, state_file)
+            del tree_entries
+            self._debug_log("remote_snapshot_saved", state_file)
+
+            # Load the stored last update commit (if any) for local modification detection.
+            stored_commit: str = self._load_stored_update_commit()
+            self._debug_log("stored_commit", stored_commit if stored_commit else "none")
+
+            # Scan local filesystem and save to temp file
+            local_files: list = self._list_local_files("")
+            self._debug_log("local_scan_done", "count={}".format(len(local_files)))
+            self._save_local_files_snapshot(local_files, local_files_file)
+            self._debug_log("local_snapshot_saved", local_files_file)
+
+            # Process incrementally and build updates list
+            updates: list = self._process_updates_incremental(state_file, local_files_file, branch_name, stored_commit)
+            self._debug_log("check_complete", "updates={}".format(len(updates)))
+
+            return {
+                "repo_owner": self.repo_owner,
+                "repo_name": self.repo_name,
+                "repository": self.repository_slug,
+                "branch": branch_name,
+                "commit_sha": commit_sha,
+                "updates": updates,
+                "has_updates": len(updates) > 0,
+            }
+
+        finally:
+            # Clean up temporary files
+            self._cleanup_temp_file(state_file)
+            self._cleanup_temp_file(local_files_file)
+            self._debug_log("temp_cleanup_done", "{} {}".format(state_file, local_files_file))
+
+    def _save_tree_snapshot_from_entries(self, tree_entries: list, filename: str) -> None:
+        """Save pre-fetched tree entries to a newline-delimited snapshot file."""
+
+        written_entries: int = 0
+
+        with open(filename, "w") as file_handle:
+            for entry in tree_entries:
+                entry_type: str = entry.get("type", "")
+                entry_path: str = entry.get("path", "")
+                entry_sha: str = entry.get("sha", "")
+                if not entry_path or not entry_sha:
+                    continue
+
+                if entry_type == "commit" and self._should_track_path(entry_path):
+                    file_handle.write(json.dumps({"type": "submodule", "path": entry_path, "sha": entry_sha}) + "\n")
+                    written_entries += 1
+                elif entry_type == "blob" and self._should_track_path(entry_path):
+                    file_handle.write(json.dumps({"type": "blob", "path": entry_path, "sha": entry_sha}) + "\n")
+                    written_entries += 1
+
+        self._debug_log("snapshot_done", "written={}".format(written_entries))
+
+    def _save_local_files_snapshot(self, local_files: list, filename: str) -> None:
+        """Save local file list to a temporary JSON file."""
+
+        with open(filename, "w") as file_handle:
+            for local_path in sorted(local_files):
+                file_handle.write(local_path + "\n")
+
+    def _process_updates_incremental(
+        self, tree_file: str, local_files_file: str, branch_name: str, stored_commit: str = ""
+    ) -> list:
+        """Process remote tree and local files incrementally in chunks.
+
+        Yields updates without loading entire data structures into memory at once.
+        When stored_commit is provided, distinguishes between repo changes and local-only modifications.
+        """
+
+        # Load local files set once for quick membership checks.
+        try:
+            local_files_set: set = set()
+            with open(local_files_file, "r") as file_handle:
+                while True:
+                    line = file_handle.readline()
+                    if not line:
+                        break
+
+                    local_path = line.strip()
+                    if local_path:
+                        local_files_set.add(local_path)
+        except (OSError, ValueError):
+            local_files_set = set()
+
+        # Track submodules for a second pass and track all remote file paths for delete detection.
         submodules: dict = {}
+        remote_paths_set: set = set()
+        updates: list = []
 
-        # Separate regular files from submodules
-        for entry in remote_tree:
-            path = entry.get("path", "")
+        # First pass: process top-level repository entries from the snapshot file line-by-line.
+        processed_snapshot_entries: int = 0
+        try:
+            with open(tree_file, "r") as file_handle:
+                while True:
+                    raw_line = file_handle.readline()
+                    if not raw_line:
+                        break
 
-            if entry.get("type") == "commit":
-                # This is a submodule
-                if self._should_track_path(path):
-                    submodules[path] = entry.get("sha", "")
-                continue
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
 
-            if entry.get("type") != "blob":
-                continue
+                    try:
+                        entry: dict = json.loads(raw_line)
+                    except ValueError:
+                        continue
 
-            if not self._should_track_path(path):
-                continue
+                    entry_type: str = entry.get("type", "")
+                    path: str = entry.get("path", "")
+                    sha: str = entry.get("sha", "")
+                    processed_snapshot_entries += 1
+                    if processed_snapshot_entries % self.debug_log_sample_every == 0:
+                        self._debug_log(
+                            "compare_progress",
+                            "entries={} updates={} submodules={}".format(
+                                processed_snapshot_entries,
+                                len(updates),
+                                len(submodules),
+                            ),
+                        )
+                    if not path:
+                        continue
 
-            remote_file_map[path] = entry.get("sha", "")
+                    if entry_type == "submodule":
+                        submodules[path] = sha
+                        continue
 
-        # Process submodules if enabled
+                    if entry_type != "blob":
+                        continue
+
+                    remote_paths_set.add(path)
+                    if path not in local_files_set:
+                        updates.append({"path": path, "status": "added"})
+                        continue
+
+                    local_sha: str = self._local_git_blob_sha(path)
+                    if local_sha != sha:
+                        # If we have a stored commit, distinguish between repo changes and local-only mods
+                        if stored_commit:
+                            updates.append({"path": path, "status": "locally_modified"})
+                        else:
+                            updates.append({"path": path, "status": "modified"})
+        except (OSError, ValueError):
+            pass
+
+        # Process submodules if enabled, using iterative tree walking per submodule.
         if self.track_submodules and submodules:
-            gitmodules = self._fetch_gitmodules(branch_name)
+            gitmodules: dict = self._fetch_gitmodules(branch_name)
+            self._debug_log("submodules_start", "detected={} mapped={}".format(len(submodules), len(gitmodules)))
+
             for submodule_path, submodule_sha in submodules.items():
-                submodule_info = gitmodules.get(submodule_path, {})
-                submodule_url = submodule_info.get("url", "")
+                submodule_info: dict = gitmodules.get(submodule_path, {})
+                submodule_url: str = submodule_info.get("url", "")
                 if not submodule_url:
+                    self._debug_log("submodule_skipped", "path={} reason=no_url".format(submodule_path))
                     continue
 
                 try:
+                    self._debug_log("submodule_begin", "path={}".format(submodule_path))
                     submodule_owner, submodule_repo = self._parse_github_url(submodule_url)
-                    submodule_tree = self._fetch_submodule_tree(submodule_owner, submodule_repo, submodule_sha)
-
-                    for entry in submodule_tree:
-                        if entry.get("type") != "blob":
-                            continue
-
-                        file_path = submodule_path + "/" + entry.get("path", "")
+                    for submodule_file_path, remote_sha in self._iter_submodule_blob_entries(
+                        submodule_owner,
+                        submodule_repo,
+                        submodule_sha,
+                    ):
+                        file_path: str = submodule_path + "/" + submodule_file_path
                         if not self._should_track_path(file_path):
                             continue
 
-                        remote_file_map[file_path] = entry.get("sha", "")
+                        remote_paths_set.add(file_path)
+
+                        if file_path not in local_files_set:
+                            updates.append({"path": file_path, "status": "added"})
+                            continue
+
+                        local_sha: str = self._local_git_blob_sha(file_path)
+                        if local_sha != remote_sha:
+                            # If we have a stored commit, distinguish between repo changes and local-only mods
+                            if stored_commit:
+                                updates.append({"path": file_path, "status": "locally_modified"})
+                            else:
+                                updates.append({"path": file_path, "status": "modified"})
+
+                    self._debug_log("submodule_done", "path={} updates={}".format(submodule_path, len(updates)))
+
                 except Exception:
                     # Skip submodules that fail to fetch
+                    self._debug_log("submodule_failed", "path={}".format(submodule_path))
                     pass
 
-        local_files: set = set(self._list_local_files(""))
-        updates: list = []
-
-        for path in sorted(remote_file_map.keys()):
-            remote_sha = remote_file_map.get(path, "")
-
-            if path not in local_files:
-                updates.append({"path": path, "status": "added"})
-                continue
-
-            local_sha = self._local_git_blob_sha(path)
-            if local_sha != remote_sha:
-                updates.append({"path": path, "status": "modified"})
-
-        for local_path in sorted(local_files):
-            if local_path not in remote_file_map:
+        # Deleted files are those that exist locally but were not found remotely.
+        for local_path in sorted(local_files_set):
+            if local_path not in remote_paths_set:
                 updates.append({"path": local_path, "status": "deleted"})
 
-        return {
-            "repo_owner": self.repo_owner,
-            "repo_name": self.repo_name,
-            "repository": self.repository_slug,
-            "branch": branch_name,
-            "updates": updates,
-            "has_updates": len(updates) > 0,
-        }
+        self._debug_log(
+            "compare_done",
+            "entries={} remote_paths={} updates={}".format(
+                processed_snapshot_entries,
+                len(remote_paths_set),
+                len(updates),
+            ),
+        )
 
-    def apply_updates(self, branch_name: str, updates: list, remove_deleted: bool = False) -> dict:
-        """Apply a previously computed update list and return the result summary."""
+        return updates
+
+    @staticmethod
+    def _cleanup_temp_file(filename: str) -> None:
+        """Delete a temporary file if it exists."""
+
+        try:
+            os.remove(filename)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _load_stored_update_commit() -> str:
+        """Load the commit SHA from .ota_deployed_commit.json (written by upload.ps1)."""
+
+        try:
+            with open(".ota_deployed_commit.json", "r") as file_handle:
+                content = file_handle.read()
+                data = json.loads(content)
+                return data.get("commit_sha", "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def save_update_commit(commit_sha: str, branch_name: str) -> None:
+        """Save the commit SHA to .ota_deployed_commit.json after a successful OTA update."""
+
+        try:
+            data: dict = {"commit_sha": commit_sha, "branch": branch_name}
+            with open(".ota_deployed_commit.json", "w") as file_handle:
+                file_handle.write(json.dumps(data))
+        except Exception:
+            pass
+
+    def _debug_log(self, stage: str, message: str = "") -> None:
+        """Print a debug line when OTA debug logging is enabled."""
+
+        if not self.debug_logging:
+            return
+
+        memory_suffix = self._debug_memory_suffix()
+        if message:
+            line = "[ota] {}: {}{}".format(stage, message, memory_suffix)
+        else:
+            line = "[ota] {}{}".format(stage, memory_suffix)
+
+        print(line)
+
+    @staticmethod
+    def _debug_memory_suffix() -> str:
+        """Return a compact memory suffix for debug log lines."""
+
+        try:
+            import gc
+
+            return " mem_free={} mem_alloc={}".format(gc.mem_free(), gc.mem_alloc())
+        except Exception:
+            return ""
+
+    def apply_updates(
+        self, branch_name: str, updates: list, remove_deleted: bool = False, commit_sha: str = ""
+    ) -> dict:
+        """Apply a previously computed update list and return the result summary.
+
+        If commit_sha is provided, it will be stored after successful apply for tracking.
+        """
 
         applied_files: list = []
         removed_files: list = []
@@ -169,6 +455,9 @@ class OTAUpdater:
                     applied_files.append(path)
                 except Exception as error:
                     failed_files.append({"path": path, "error": str(error)})
+            elif status == "locally_modified":
+                # Skip locally-modified files (user chose to keep local version)
+                pass
             elif status == "deleted" and remove_deleted:
                 try:
                     if self._path_exists(path):
@@ -176,6 +465,11 @@ class OTAUpdater:
                     removed_files.append(path)
                 except Exception as error:
                     failed_files.append({"path": path, "error": str(error)})
+
+        # After successful apply, save the commit hash for next check
+        if commit_sha and len(failed_files) == 0:
+            self.save_update_commit(commit_sha, branch_name)
+            self._debug_log("commit_saved", commit_sha)
 
         return {
             "repository": self.repository_slug,
@@ -187,40 +481,51 @@ class OTAUpdater:
         }
 
     def _fetch_repo_tree(self) -> tuple:
-        """Fetch the recursive git tree from GitHub using candidate branches."""
+        """Fetch the full recursive tree and branch HEAD commit, trying candidate branches in order.
 
-        last_error: Exception | None = None
+        Returns (branch_name, tree_entries, commit_sha) on success.
+        """
+
+        last_error = None
 
         for branch_name in self.candidate_branches:
-            url = (
-                self._GITHUB_API_BASE
-                + "/repos/"
-                + self.repo_owner
-                + "/"
-                + self.repo_name
-                + "/git/trees/"
-                + branch_name
-                + "?recursive=1"
-            )
-
             try:
-                status_code, response_headers, body = self._http_get(url)
-                if status_code != 200:
-                    raise OSError("GitHub API returned HTTP {}".format(status_code))
-
-                payload = json.loads(body.decode("utf-8"))
-                tree = payload.get("tree", [])
-                if not isinstance(tree, list):
-                    raise ValueError("Unexpected tree payload")
-
-                return tree, branch_name
+                self._debug_log("fetch_branch_attempt", branch_name)
+                tree_entries = self._fetch_tree_entries(self.repo_owner, self.repo_name, branch_name, recursive=True)
+                self._debug_log("tree_fetched", "branch={} entries={}".format(branch_name, len(tree_entries)))
+                commit_sha = self._fetch_branch_head_commit(self.repo_owner, self.repo_name, branch_name)
+                self._debug_log("commit_fetched", "branch={} sha={}".format(branch_name, commit_sha))
+                return branch_name, tree_entries, commit_sha
             except Exception as error:
+                self._debug_log("branch_failed", "branch={} error={}".format(branch_name, str(error)))
                 last_error = error
 
         if last_error is None:
-            raise OSError("Unable to fetch repository tree")
+            raise OSError("Unable to resolve repository branch")
 
         raise last_error
+
+    def _fetch_branch_head_commit(self, repo_owner: str, repo_name: str, branch_name: str) -> str:
+        """Fetch the commit SHA of the branch HEAD."""
+
+        # Try the simpler commits endpoint first
+        url = self._GITHUB_API_BASE + "/repos/" + repo_owner + "/" + repo_name + "/commits/" + branch_name
+
+        try:
+            self._debug_log("commit_api_call", "url={}".format(url))
+            status_code, response_headers, body = self._http_get(url)
+            self._debug_log("commit_api_response", "status={}".format(status_code))
+            if status_code != 200:
+                raise OSError("GitHub API returned HTTP {} for branch {}".format(status_code, branch_name))
+
+            payload = json.loads(body.decode("utf-8"))
+            commit_sha: str = payload.get("sha", "")
+            if not commit_sha:
+                raise ValueError("No commit SHA found for branch {}".format(branch_name))
+
+            return commit_sha
+        except Exception as error:
+            raise OSError("Failed to fetch branch HEAD for {}@{}: {}".format(repo_name, branch_name, str(error)))
 
     def _fetch_gitmodules(self, branch_name: str) -> dict:
         """Fetch and parse .gitmodules file to extract submodule mappings.
@@ -251,7 +556,7 @@ class OTAUpdater:
         """
 
         submodules: dict = {}
-        current_section: str | None = None
+        current_section = None
 
         for line in content.split("\n"):
             line = line.strip()
@@ -302,32 +607,54 @@ class OTAUpdater:
     def _fetch_submodule_tree(self, submodule_owner: str, submodule_repo: str, commit_sha: str) -> list:
         """Fetch the tree for a submodule at a specific commit SHA."""
 
-        url = (
-            self._GITHUB_API_BASE
-            + "/repos/"
-            + submodule_owner
-            + "/"
-            + submodule_repo
-            + "/git/trees/"
-            + commit_sha
-            + "?recursive=1"
-        )
+        return self._fetch_tree_entries(submodule_owner, submodule_repo, commit_sha, recursive=True)
+
+    def _fetch_tree_entries(self, repo_owner: str, repo_name: str, tree_ref: str, recursive: bool = False) -> list:
+        """Fetch tree entries for a repository tree ref or branch name."""
+
+        url = self._GITHUB_API_BASE + "/repos/" + repo_owner + "/" + repo_name + "/git/trees/" + tree_ref
+        if recursive:
+            url = url + "?recursive=1"
 
         try:
             status_code, response_headers, body = self._http_get(url)
             if status_code != 200:
-                raise OSError("GitHub API returned HTTP {} for submodule {}".format(status_code, submodule_repo))
+                raise OSError("GitHub API returned HTTP {} for {}".format(status_code, repo_name))
 
             payload = json.loads(body.decode("utf-8"))
             tree = payload.get("tree", [])
             if not isinstance(tree, list):
-                raise ValueError("Unexpected tree payload for submodule")
+                raise ValueError("Unexpected tree payload")
 
             return tree
         except Exception as error:
-            raise OSError(
-                "Failed to fetch submodule tree for {}@{}: {}".format(submodule_repo, commit_sha, str(error))
-            )
+            raise OSError("Failed to fetch tree for {}@{}: {}".format(repo_name, tree_ref, str(error)))
+
+    def _iter_submodule_blob_entries(self, submodule_owner: str, submodule_repo: str, root_tree_sha: str) -> object:
+        """Yield (path, sha) blob entries by iteratively walking submodule trees."""
+
+        tree_stack: list = [("", root_tree_sha)]
+
+        while tree_stack:
+            base_path, tree_sha = tree_stack.pop()
+            tree_entries = self._fetch_tree_entries(submodule_owner, submodule_repo, tree_sha, recursive=False)
+
+            for entry in tree_entries:
+                entry_type: str = entry.get("type", "")
+                entry_name: str = entry.get("path", "")
+                entry_sha: str = entry.get("sha", "")
+                if not entry_name or not entry_sha:
+                    continue
+
+                if base_path:
+                    full_path = base_path + "/" + entry_name
+                else:
+                    full_path = entry_name
+
+                if entry_type == "blob":
+                    yield full_path, entry_sha
+                elif entry_type == "tree":
+                    tree_stack.append((full_path, entry_sha))
 
     def _download_raw_file(self, path: str, branch_name: str) -> bytes:
         """Download one file from raw.githubusercontent.com and return bytes."""
@@ -382,9 +709,16 @@ class OTAUpdater:
                 + "Accept: */*\r\n"
                 + "Connection: close\r\n\r\n"
             )
-            sock.send(request.encode("utf-8"))
+            request_bytes = request.encode("utf-8")
+            try:
+                sock.write(request_bytes)
+            except AttributeError:
+                sock.send(request_bytes)
 
-            stream = sock.makefile("rb")
+            try:
+                stream = sock.makefile("rb")
+            except AttributeError:
+                stream = OTAUpdater._SocketStreamFallback(sock)
             status_line = stream.readline().decode("utf-8", "replace").strip()
             status_code = self._parse_status_code(status_line)
 
@@ -508,6 +842,10 @@ class OTAUpdater:
         if ".." in path or "\\" in path:
             return False
 
+        # Exclude all .md files (documentation)
+        if path.endswith(".md"):
+            return False
+
         if path in self.excluded_paths:
             return False
 
@@ -528,38 +866,72 @@ class OTAUpdater:
 
         return False
 
+    def _should_descend_into_path(self, path: str) -> bool:
+        """Return True when a directory path should be traversed."""
+
+        normalized_path = path.rstrip("/")
+        if not normalized_path:
+            return True
+
+        if normalized_path in self.excluded_paths:
+            return False
+
+        for excluded_prefix in self.excluded_path_prefixes:
+            normalized_excluded = excluded_prefix.rstrip("/")
+            if normalized_path == normalized_excluded or normalized_path.startswith(normalized_excluded + "/"):
+                return False
+
+        if not self.tracked_root_prefixes:
+            return True
+
+        for tracked_prefix in self.tracked_root_prefixes:
+            normalized_tracked = tracked_prefix.rstrip("/")
+            if (
+                normalized_path == normalized_tracked
+                or normalized_path.startswith(normalized_tracked + "/")
+                or normalized_tracked.startswith(normalized_path + "/")
+            ):
+                return True
+
+        return False
+
     def _list_local_files(self, relative_dir: str) -> list:
-        """Recursively list local tracked files using forward-slash paths."""
+        """List local tracked files using an iterative directory walk."""
 
-        base_path = relative_dir if relative_dir else "."
-        try:
-            entries = os.listdir(base_path)
-        except OSError:
-            return []
-
+        initial_dir = relative_dir if relative_dir else "."
+        pending_dirs: list = [initial_dir]
         results: list = []
-        for entry in entries:
-            if entry in self.excluded_local_dirs:
-                continue
 
-            if relative_dir:
-                relative_path = relative_dir + "/" + entry
-            else:
-                relative_path = entry
-
+        while pending_dirs:
+            current_dir = pending_dirs.pop()
             try:
-                stat_info = os.stat(relative_path)
-                mode = stat_info[0]
+                entries = os.listdir(current_dir)
             except OSError:
                 continue
 
-            is_directory = bool(mode & 0x4000)
-            if is_directory:
-                results.extend(self._list_local_files(relative_path))
-            else:
-                normalized = relative_path.replace("\\", "/")
-                if self._should_track_path(normalized):
-                    results.append(normalized)
+            for entry in entries:
+                if entry in self.excluded_local_dirs:
+                    continue
+
+                if current_dir == ".":
+                    relative_path = entry
+                else:
+                    relative_path = current_dir + "/" + entry
+
+                try:
+                    stat_info = os.stat(relative_path)
+                    mode = stat_info[0]
+                except OSError:
+                    continue
+
+                is_directory = bool(mode & 0x4000)
+                if is_directory:
+                    pending_dirs.append(relative_path)
+                    continue
+
+                normalized_path = relative_path.replace("\\", "/")
+                if self._should_track_path(normalized_path):
+                    results.append(normalized_path)
 
         return results
 
@@ -587,8 +959,8 @@ class OTAUpdater:
         """Return SHA-1 in the same format git uses for blob objects."""
 
         header = "blob {}\0".format(len(data)).encode("utf-8")
-        digest = hashlib.sha1(header + data).hexdigest()
-        return digest
+        raw = hashlib.sha1(header + data).digest()
+        return "".join("{:02x}".format(b) for b in raw)
 
     def _write_file(self, path: str, file_bytes: bytes) -> None:
         """Create parent directories as needed and write bytes to disk."""

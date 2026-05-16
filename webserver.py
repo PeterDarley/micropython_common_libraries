@@ -25,6 +25,10 @@ try:
     import _thread
 
     _THREAD = True
+    # ESP32 MicroPython defaults to ~8 KB thread stack which is too small for
+    # TLS/SSL operations (GitHub HTTPS calls need ~16-20 KB).  Set a larger
+    # default so request-handler threads can safely make outbound HTTPS calls.
+    _thread.stack_size(32768)
 except ImportError:
     _THREAD = False
 
