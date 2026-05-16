@@ -106,9 +106,7 @@ class OTAUpdater:
 
                 try:
                     submodule_owner, submodule_repo = self._parse_github_url(submodule_url)
-                    submodule_tree = self._fetch_submodule_tree(
-                        submodule_owner, submodule_repo, submodule_sha
-                    )
+                    submodule_tree = self._fetch_submodule_tree(submodule_owner, submodule_repo, submodule_sha)
 
                     for entry in submodule_tree:
                         if entry.get("type") != "blob":
@@ -230,16 +228,7 @@ class OTAUpdater:
         Returns a dict mapping submodule paths to {url, ...} dicts.
         """
 
-        url = (
-            self._GITHUB_RAW_BASE
-            + "/"
-            + self.repo_owner
-            + "/"
-            + self.repo_name
-            + "/"
-            + branch_name
-            + "/.gitmodules"
-        )
+        url = self._GITHUB_RAW_BASE + "/" + self.repo_owner + "/" + self.repo_name + "/" + branch_name + "/.gitmodules"
 
         try:
             status_code, response_headers, body = self._http_get(url)
@@ -310,9 +299,7 @@ class OTAUpdater:
 
         return parts[0], parts[1]
 
-    def _fetch_submodule_tree(
-        self, submodule_owner: str, submodule_repo: str, commit_sha: str
-    ) -> list:
+    def _fetch_submodule_tree(self, submodule_owner: str, submodule_repo: str, commit_sha: str) -> list:
         """Fetch the tree for a submodule at a specific commit SHA."""
 
         url = (
@@ -329,11 +316,7 @@ class OTAUpdater:
         try:
             status_code, response_headers, body = self._http_get(url)
             if status_code != 200:
-                raise OSError(
-                    "GitHub API returned HTTP {} for submodule {}".format(
-                        status_code, submodule_repo
-                    )
-                )
+                raise OSError("GitHub API returned HTTP {} for submodule {}".format(status_code, submodule_repo))
 
             payload = json.loads(body.decode("utf-8"))
             tree = payload.get("tree", [])
@@ -343,9 +326,7 @@ class OTAUpdater:
             return tree
         except Exception as error:
             raise OSError(
-                "Failed to fetch submodule tree for {}@{}: {}".format(
-                    submodule_repo, commit_sha, str(error)
-                )
+                "Failed to fetch submodule tree for {}@{}: {}".format(submodule_repo, commit_sha, str(error))
             )
 
     def _download_raw_file(self, path: str, branch_name: str) -> bytes:
