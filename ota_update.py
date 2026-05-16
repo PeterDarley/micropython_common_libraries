@@ -141,6 +141,50 @@ class OTAUpdater:
         self.debug_log_path: str = debug_log_path if debug_log_path else ".ota_debug.log"
         self.debug_log_sample_every: int = debug_log_sample_every if debug_log_sample_every > 0 else 50
 
+        # Read .gitignore and add patterns to excluded paths
+        self._merge_gitignore_exclusions()
+
+    def _merge_gitignore_exclusions(self) -> None:
+        """Read .gitignore from device and merge patterns into excluded lists."""
+
+        try:
+            with open(".gitignore", "r") as f:
+                lines = f.read().split("\n")
+        except OSError:
+            # No .gitignore file, continue with existing exclusions
+            return
+
+        new_excluded_paths = list(self.excluded_paths)
+        new_excluded_prefixes = list(self.excluded_path_prefixes)
+
+        for line in lines:
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith("#"):
+                continue
+
+            # Handle trailing slash (directory marker)
+            is_dir = line.endswith("/")
+            if is_dir:
+                line = line.rstrip("/")
+
+            # Skip complex patterns we can't handle simply
+            if "**" in line or "?" in line or "[" in line:
+                continue
+
+            # Add to excluded paths
+            if "*" in line:
+                # Pattern like "*.pyc" or "*.pyo"
+                new_excluded_prefixes.append(line)
+            else:
+                # Exact filename or directory
+                new_excluded_paths.append(line)
+                if is_dir:
+                    new_excluded_prefixes.append(line + "/")
+
+        self.excluded_paths = tuple(new_excluded_paths)
+        self.excluded_path_prefixes = tuple(new_excluded_prefixes)
+
     @property
     def repository_slug(self) -> str:
         """Return repository slug in owner/name format."""
@@ -201,23 +245,47 @@ class OTAUpdater:
         """Save pre-fetched tree entries to a newline-delimited snapshot file."""
 
         written_entries: int = 0
+        skipped_entries: int = 0
+        blob_entries: int = 0
+        submodule_entries: int = 0
 
         with open(filename, "w") as file_handle:
             for entry in tree_entries:
                 entry_type: str = entry.get("type", "")
                 entry_path: str = entry.get("path", "")
                 entry_sha: str = entry.get("sha", "")
+
                 if not entry_path or not entry_sha:
+                    skipped_entries += 1
                     continue
 
-                if entry_type == "commit" and self._should_track_path(entry_path):
-                    file_handle.write(json.dumps({"type": "submodule", "path": entry_path, "sha": entry_sha}) + "\n")
-                    written_entries += 1
-                elif entry_type == "blob" and self._should_track_path(entry_path):
-                    file_handle.write(json.dumps({"type": "blob", "path": entry_path, "sha": entry_sha}) + "\n")
-                    written_entries += 1
+                if entry_type == "blob":
+                    blob_entries += 1
+                    if self._should_track_path(entry_path):
+                        file_handle.write(json.dumps({"type": "blob", "path": entry_path, "sha": entry_sha}) + "\n")
+                        written_entries += 1
+                    else:
+                        self._debug_log("entry_filtered", "path={}".format(entry_path))
+                        skipped_entries += 1
+                elif entry_type == "commit":
+                    submodule_entries += 1
+                    if self._should_track_path(entry_path):
+                        file_handle.write(
+                            json.dumps({"type": "submodule", "path": entry_path, "sha": entry_sha}) + "\n"
+                        )
+                        written_entries += 1
+                    else:
+                        self._debug_log("entry_filtered", "path={}".format(entry_path))
+                        skipped_entries += 1
+                else:
+                    skipped_entries += 1
 
-        self._debug_log("snapshot_done", "written={}".format(written_entries))
+        self._debug_log(
+            "snapshot_done",
+            "written={} blobs={} submodules={} skipped={}".format(
+                written_entries, blob_entries, submodule_entries, skipped_entries
+            ),
+        )
 
     def _save_local_files_snapshot(self, local_files: list, filename: str) -> None:
         """Save local file list to a temporary JSON file."""
@@ -860,9 +928,17 @@ class OTAUpdater:
         if path in self.tracked_root_files:
             return True
 
+        # Check exact prefix matches (e.g., "lib/" in prefixes matches "lib/*")
         for prefix in self.tracked_root_prefixes:
             if path.startswith(prefix):
                 return True
+
+        # Also track submodule directory names (e.g., "lib" if "lib/" is in prefixes)
+        for prefix in self.tracked_root_prefixes:
+            if prefix.endswith("/"):
+                dir_name = prefix.rstrip("/")
+                if path == dir_name:
+                    return True
 
         return False
 
@@ -947,10 +1023,34 @@ class OTAUpdater:
 
     @staticmethod
     def _local_git_blob_sha(path: str) -> str:
-        """Compute git-compatible blob SHA-1 for a local file."""
+        """Compute git-compatible blob SHA-1 for a local file.
+
+        Normalizes line endings (CRLF -> LF) for text files to match repo
+        storage format, accounting for git's autocrlf setting on Windows.
+        Binary files are not modified.
+        """
 
         with open(path, "rb") as file_handle:
             data = file_handle.read()
+
+        # Only normalize line endings for text files
+        text_extensions = (
+            ".py",
+            ".html",
+            ".txt",
+            ".json",
+            ".css",
+            ".js",
+            ".md",
+            ".sh",
+            ".ps1",
+            ".xml",
+            ".yml",
+            ".yaml",
+        )
+        if path.lower().endswith(text_extensions):
+            # Normalize CRLF to LF to match repo storage format
+            data = data.replace(b"\r\n", b"\n")
 
         return OTAUpdater._git_blob_sha(data)
 
