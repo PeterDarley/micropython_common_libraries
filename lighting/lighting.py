@@ -364,6 +364,40 @@ class Lighting:
 
         self._scene_functions[scene_name] = func
 
+    def _clear_runtime_filter_state(self) -> None:
+        """Clear transient runtime keys used by filter processing.
+
+        Filter definitions can be referenced by name from settings, or provided
+        inline in effects/scene entries. Runtime keys like ``_state`` should be
+        reset when scenes are restarted so timing-based filters begin cleanly.
+        """
+
+        def _clear_filter_list_runtime(filter_list: object) -> None:
+            if not isinstance(filter_list, list):
+                return
+
+            for filter_item in filter_list:
+                if isinstance(filter_item, dict):
+                    filter_item.pop("_state", None)
+                    filter_item.pop("_target_groups", None)
+
+        for stored_filter in self.settings.get("filters", {}).values():
+            if isinstance(stored_filter, dict):
+                stored_filter.pop("_state", None)
+                stored_filter.pop("_target_groups", None)
+
+        for effect_dict in self.settings.get("effects", {}).values():
+            if isinstance(effect_dict, dict):
+                _clear_filter_list_runtime(effect_dict.get("filters"))
+
+        for scene_dict in self.settings.get("scenes", {}).values():
+            if not isinstance(scene_dict, dict):
+                continue
+
+            for scene_entry in scene_dict.values():
+                if isinstance(scene_entry, dict):
+                    _clear_filter_list_runtime(scene_entry.get("filters"))
+
     def set_scene(self, scene_name: str = None, **kwargs) -> None:
         """Replace all active scenes with a single scene and reset state.
 
@@ -400,6 +434,8 @@ class Lighting:
         # Skip if already running just this scene with no kwargs and not finished.
         if self._active_scenes == [resolved] and not kwargs and not self.scene_finished:
             return
+
+        self._clear_runtime_filter_state()
 
         self._active_scenes = [resolved]
         self._scene_start_ticks = {resolved: 0}
@@ -634,6 +670,7 @@ class Lighting:
                     # Apply filters if present.
                     if "filters" in effect:
                         stored_filters = self.settings.get("filters", {})
+                        filtered_colors = target_colors
 
                         for filter_ref in effect["filters"]:
                             # Resolve named filter reference to its definition dict.
@@ -653,10 +690,15 @@ class Lighting:
                                     filter_dict["_target_groups"] = self._target_component_groups(effect.get("target"))
                                     transient_target_groups_set = True
 
-                                result = filter_func(filter_dict, target_colors, tick_number=tick_number)
+                                filter_result = filter_func(filter_dict, filtered_colors, tick_number=tick_number)
 
                                 if transient_target_groups_set and "_target_groups" in filter_dict:
                                     del filter_dict["_target_groups"]
+
+                                if filter_result is not None:
+                                    filtered_colors = filter_result
+
+                        result = filtered_colors
 
                     if result:
                         for led_index, color in result:

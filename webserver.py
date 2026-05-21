@@ -1045,6 +1045,25 @@ class WebServer:
             return self._MIME.get(filename[dot:], "application/octet-stream")
         return "application/octet-stream"
 
+    def _send_all(self, cl_sock, data: bytes) -> None:
+        """Reliably write all bytes to the client socket.
+
+        Some MicroPython socket implementations may perform partial writes on
+        ``send``. This loop keeps sending until the full buffer is transmitted.
+        """
+
+        if not data:
+            return
+
+        total_sent = 0
+        while total_sent < len(data):
+            sent_count = cl_sock.send(data[total_sent:])
+            if sent_count is None:
+                sent_count = 0
+            if sent_count <= 0:
+                raise OSError("socket send returned no progress")
+            total_sent += sent_count
+
     def _send_response(
         self, cl_sock, status_code, reason, content, content_type="text/html", extra_headers=None, keep_alive=False
     ) -> None:
@@ -1062,9 +1081,9 @@ class WebServer:
                 for key, value in extra_headers.items():
                     header += "\r\n{}: {}".format(key, value)
             header += "\r\n\r\n"
-            cl_sock.send(header.encode("utf-8"))
+            self._send_all(cl_sock, header.encode("utf-8"))
             if body_bytes:
-                cl_sock.send(body_bytes)
+                self._send_all(cl_sock, body_bytes)
         except OSError as error:
             self._log("websrv: send response failed", error)
 
@@ -1086,7 +1105,7 @@ class WebServer:
             header = "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nETag: {}\r\nConnection: {}\r\n\r\n".format(
                 content_type, file_size, cache_control, etag, "keep-alive" if keep_alive else "close"
             )
-            cl_sock.send(header.encode("utf-8"))
+            self._send_all(cl_sock, header.encode("utf-8"))
 
             chunk_size = 4096
             with open(file_path, "rb") as f:
@@ -1094,7 +1113,7 @@ class WebServer:
                     chunk = f.read(chunk_size)
                     if not chunk:
                         break
-                    cl_sock.send(chunk)
+                    self._send_all(cl_sock, chunk)
 
         except OSError as error:
             self._log("websrv: send static file failed", file_path, error)
@@ -1121,7 +1140,7 @@ class WebServer:
             header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nETag: {}\r\n\r\n".format(
                 status_code, reason, content_type, file_size, cache_control, etag
             )
-            cl_sock.send(header.encode("utf-8"))
+            self._send_all(cl_sock, header.encode("utf-8"))
 
             # Stream file in 4KB chunks
             chunk_size = 4096
@@ -1131,7 +1150,7 @@ class WebServer:
                         chunk = f.read(chunk_size)
                         if not chunk:
                             break
-                        cl_sock.send(chunk)
+                        self._send_all(cl_sock, chunk)
             finally:
                 # Clean up the temp file
                 try:
