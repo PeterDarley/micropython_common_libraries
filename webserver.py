@@ -1081,9 +1081,10 @@ class WebServer:
             file_mtime = stat[8] if len(stat) > 8 else 0
 
             etag = '"{}-{}"'.format(file_size, file_mtime)
+            cache_control = self._cache_control_for_content_type(content_type)
 
-            header = "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=2592000\r\nETag: {}\r\nConnection: {}\r\n\r\n".format(
-                content_type, file_size, etag, "keep-alive" if keep_alive else "close"
+            header = "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nETag: {}\r\nConnection: {}\r\n\r\n".format(
+                content_type, file_size, cache_control, etag, "keep-alive" if keep_alive else "close"
             )
             cl_sock.send(header.encode("utf-8"))
 
@@ -1114,10 +1115,11 @@ class WebServer:
 
             # Generate simple ETag from size and mtime
             etag = '"{}-{}"'.format(file_size, file_mtime)
+            cache_control = self._cache_control_for_content_type(content_type)
 
             # Send HTTP headers with caching directives
-            header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=2592000\r\nETag: {}\r\n\r\n".format(
-                status_code, reason, content_type, file_size, etag
+            header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nETag: {}\r\n\r\n".format(
+                status_code, reason, content_type, file_size, cache_control, etag
             )
             cl_sock.send(header.encode("utf-8"))
 
@@ -1136,8 +1138,26 @@ class WebServer:
                     os.remove(file_path)
                 except OSError as error:
                     self._log("websrv: temp file cleanup failed", file_path, error)
+
         except OSError as error:
             self._log("websrv: send file failed", file_path, error)
+
+    def _cache_control_for_content_type(self, content_type: str) -> str:
+        """Return Cache-Control policy for static responses.
+
+        JavaScript and CSS are forced to revalidate on each request so UI
+        changes appear immediately after deployment. Other assets keep a long
+        max-age for efficiency.
+        """
+
+        if content_type in (
+            "application/javascript",
+            "text/javascript",
+            "text/css",
+        ):
+            return "no-cache, max-age=0, must-revalidate"
+
+        return "public, max-age=2592000"
 
     def _send_result(self, cl_sock, res, keep_alive: bool = False) -> None:
         """Normalise a route handler return value and send it as a response."""
