@@ -1,94 +1,15 @@
-import math
-import random
-
 from animation import Animation
 from leds import LEDs
 from storage import PersistentDict
 
 from lighting.colors import colors
-
-# Pattern metadata: defines required and optional parameters for each pattern
-PATTERN_METADATA: dict = {
-    "solid": {
-        "description": "Solid color",
-        "required": ["target", "colors"],
-        "optional": [],
-        "color_count": 1,
-    },
-    "blink": {
-        "description": "Blinking color",
-        "required": ["target", "colors"],
-        "optional": ["duration", "frequency"],
-        "color_count": 2,
-    },
-    "pulse": {
-        "description": "Pulsing color",
-        "required": ["target", "colors"],
-        "optional": ["duration", "period"],
-        "color_count": 2,
-    },
-    "fade_in": {
-        "description": "Fade between two colors",
-        "required": ["target", "colors"],
-        "optional": ["duration"],
-        "color_count": 2,
-    },
-    "breathe": {
-        "description": "Breathing effect",
-        "required": ["target", "colors"],
-        "optional": ["duration"],
-        "color_count": 2,
-    },
-    "wave": {
-        "description": "Moving wave effect",
-        "required": ["target", "colors"],
-        "optional": ["duration", "number", "width", "reverse"],
-        "color_count": 2,
-    },
-    "cylon": {
-        "description": "Cylon bouncing effect",
-        "required": ["target", "colors"],
-        "optional": ["duration", "width"],
-        "color_count": 2,
-    },
-    "phaser_strip": {
-        "description": "Two waves from each end converging on a random meeting point",
-        "required": ["target", "colors"],
-        "optional": ["duration", "width"],
-        "color_count": 2,
-    },
-}
-
-# Filter metadata: defines optional parameters for each filter
-FILTER_METADATA: dict = {
-    "null": {
-        "description": "No filter",
-        "optional": [],
-    },
-    "sizzle": {
-        "description": "Sizzle filter",
-        "optional": ["frequency", "variation", "heat"],
-    },
-    "scintillate": {
-        "description": "Scintillate filter",
-        "optional": ["frequency", "variation", "heat"],
-    },
-    "brightness": {
-        "description": "Brightness filter",
-        "optional": ["brightness"],
-    },
-    "spike": {
-        "description": "Spike filter",
-        "optional": ["color", "duration", "period", "variation", "heat", "scope"],
-    },
-    "dropout": {
-        "description": "Dropout filter (black spike)",
-        "optional": ["duration", "period", "variation", "heat", "scope"],
-    },
-}
+from lighting.effects import EffectRuntimeMixin
+from lighting.filters import FilterMixin
+from lighting.metadata import FILTER_METADATA, PATTERN_METADATA
+from lighting.patterns import PatternMixin
 
 
-class Lighting:
+class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
     """Main lighting controller class."""
 
     def __new__(cls, *args, **kwargs):
@@ -102,7 +23,6 @@ class Lighting:
     def __init__(self):
         self.settings_object = PersistentDict()
 
-        # Small recursive copier used for migration/copy operations without importing copy.
         def _deepcopy(obj):
             if isinstance(obj, dict):
                 return {k: _deepcopy(v) for k, v in obj.items()}
@@ -114,7 +34,6 @@ class Lighting:
 
         self._deepcopy = _deepcopy
 
-        # Ensure persistent lighting settings exist as a models container; migrate legacy layout if necessary.
         if "lighting_settings" not in self.settings_object:
             default_model = {
                 "default_scene": None,
@@ -134,7 +53,6 @@ class Lighting:
             except Exception:
                 pass
 
-        # Load or migrate lighting settings and set `self.settings` to the active model dict.
         self._load_lighting_root()
 
         self._active_scenes: list = []
@@ -159,15 +77,10 @@ class Lighting:
             print(f"lighting: failed to store settings: {error}")
 
     def _load_lighting_root(self) -> None:
-        """Load lighting settings from persistent storage and select the active model.
-
-        If an old single-model layout is detected, wrap it into a models container
-        under the name "Model" and persist the change.
-        """
+        """Load lighting settings from persistent storage and select the active model."""
 
         lighting_root = self.settings_object.get("lighting_settings", {})
 
-        # Detect legacy single-model structure (contains scene/effect keys at top-level)
         legacy_keys = (
             "scenes",
             "effects",
@@ -184,7 +97,6 @@ class Lighting:
             self._store_settings()
             lighting_root = new_root
 
-        # Ensure a models container and choose the current model
         models = lighting_root.get("models", {})
         current = lighting_root.get("current_model")
         if not current or current not in models:
@@ -210,8 +122,6 @@ class Lighting:
         self.current_model_name = lighting_root.get("current_model")
         self.settings = self._lighting_root.setdefault("models", {}).setdefault(self.current_model_name, {})
 
-    # diagnostics removed
-
     def get_model_names(self) -> list:
         """Return a sorted list of available model names."""
 
@@ -228,26 +138,16 @@ class Lighting:
         self.settings = models[model_name]
         self._store_settings()
 
-        # After switching models, activate the new model's default scene (or
-        # first defined scene) so runtime state matches the selected model.
         self.set_scene(None)
 
     def create_model(self, model_name: str, copy_from_current: bool = False) -> None:
-        """Create a new minimal model.
-
-        By default this creates an empty model suitable for UI-managed creation.
-        Passing `copy_from_current=True` will copy configuration keys from the
-        active model (use sparingly).
-        """
+        """Create a new minimal model."""
 
         models = self._lighting_root.setdefault("models", {})
         if model_name in models:
             raise ValueError(f"Model '{model_name}' already exists.")
 
         if copy_from_current:
-            # Copy only known configuration keys to avoid copying runtime
-            # objects or cyclic references that may exist in the live
-            # settings dict.
             allowed_keys = [
                 "default_scene",
                 "scenes",
@@ -280,7 +180,6 @@ class Lighting:
                 "scene_settings": {},
             }
 
-        # Persist change
         self._store_settings()
 
     def delete_model(self, model_name: str) -> None:
@@ -294,10 +193,7 @@ class Lighting:
             self._store_settings()
 
     def rename_model(self, old_name: str, new_name: str) -> None:
-        """Rename a model. Updates current_model and active settings if needed.
-
-        Raises ValueError if the old name does not exist or the new name already exists.
-        """
+        """Rename a model. Updates current_model and active settings if needed."""
 
         models = self._lighting_root.get("models", {})
         if old_name not in models:
@@ -307,7 +203,6 @@ class Lighting:
 
         models[new_name] = models.pop(old_name)
 
-        # If the renamed model was the current model, update the pointer and settings
         if self.current_model_name == old_name:
             self._lighting_root["current_model"] = new_name
             self.current_model_name = new_name
@@ -316,10 +211,7 @@ class Lighting:
         self._store_settings()
 
     def wrap_current_settings_into_model(self, model_name: str = "Model") -> None:
-        """Wrap legacy top-level lighting settings into a models container.
-
-        Raises ValueError if lighting_settings already contains models.
-        """
+        """Wrap legacy top-level lighting settings into a models container."""
 
         root = self.settings_object.get("lighting_settings", {})
         if "models" in root:
@@ -355,22 +247,12 @@ class Lighting:
         colors.update(new_colors)
 
     def register_scene_function(self, scene_name: str, func: object) -> None:
-        """Register a callable to be invoked when the named scene is activated.
-
-        The function will be called as ``func(lighting=self, **kwargs)`` whenever
-        ``set_scene`` is called with that scene name, where ``kwargs`` are any
-        extra keyword arguments forwarded from ``set_scene``.
-        """
+        """Register a callable to be invoked when the named scene is activated."""
 
         self._scene_functions[scene_name] = func
 
     def _clear_runtime_filter_state(self) -> None:
-        """Clear transient runtime keys used by filter processing.
-
-        Filter definitions can be referenced by name from settings, or provided
-        inline in effects/scene entries. Runtime keys like ``_state`` should be
-        reset when scenes are restarted so timing-based filters begin cleanly.
-        """
+        """Clear transient runtime keys used by filter processing."""
 
         def _clear_filter_list_runtime(filter_list: object) -> None:
             if not isinstance(filter_list, list):
@@ -399,17 +281,10 @@ class Lighting:
                     _clear_filter_list_runtime(scene_entry.get("filters"))
 
     def set_scene(self, scene_name: str = None, **kwargs) -> None:
-        """Replace all active scenes with a single scene and reset state.
-
-        Any additional keyword arguments are stored as ``scene_kwargs`` and
-        forwarded to a registered scene function (if one exists for the scene).
-        """
+        """Replace all active scenes with a single scene and reset state."""
 
         scenes: dict = self.settings.get("scenes", {})
 
-        # Determine which scene to activate. If no scene is provided and there
-        # are no defined scenes, make this a no-op to avoid setting a None
-        # scene name into the active scene list (which would break joins).
         if scene_name is None:
             default_scene = self.settings.get("default_scene")
             if isinstance(default_scene, str) and default_scene in scenes:
@@ -419,7 +294,6 @@ class Lighting:
                 if scene_keys:
                     resolved = scene_keys[0]
                 else:
-                    # No scenes defined: clear active state and return early.
                     self._active_scenes = []
                     self._scene_start_ticks = {}
                     self.scene_kwargs = {}
@@ -431,7 +305,6 @@ class Lighting:
                 raise ValueError(f"Scene '{scene_name}' not found. Available scenes: {list(scenes.keys())}")
             resolved = scene_name
 
-        # Skip if already running just this scene with no kwargs and not finished.
         if self._active_scenes == [resolved] and not kwargs and not self.scene_finished:
             return
 
@@ -454,12 +327,7 @@ class Lighting:
             self._scene_functions[resolved](lighting=self, **kwargs)
 
     def add_scene(self, scene_name: str) -> None:
-        """Add a scene to the active set without disturbing currently running scenes.
-
-        The scene starts from the current animation tick. Does nothing if the
-        scene is already active. If the scene has a ``kills`` list in its
-        scene_settings, those scenes are removed before this one is added.
-        """
+        """Add a scene to the active set without disturbing currently running scenes."""
 
         scenes: dict = self.settings.get("scenes", {})
         if scene_name not in scenes:
@@ -468,7 +336,6 @@ class Lighting:
         if scene_name in self._active_scenes:
             return
 
-        # Remove any scenes listed in this scene's kills setting.
         scene_meta: dict = self.settings.get("scene_settings", {}).get(scene_name, {})
         for kill_name in scene_meta.get("kills", []):
             self.remove_scene(kill_name)
@@ -489,7 +356,6 @@ class Lighting:
         self._active_scenes.remove(scene_name)
         self._scene_start_ticks.pop(scene_name, None)
 
-        # Remove all state entries belonging to this scene.
         prefix = scene_name + "::"
         for key in list(self.scene_state.keys()):
             if key.startswith(prefix):
@@ -506,226 +372,8 @@ class Lighting:
         self.leds.show()
         self.logical_colors = [(0, 0, 0)] * self.leds.count
 
-    def _is_scene_finished(self, scene_name: str) -> bool:
-        """Return True if all cycle-limited effects in the given scene have finished.
-
-        Returns False if the scene has no cycle-limited effects.
-        """
-
-        scene_data = self.settings["scenes"].get(scene_name, {})
-        has_any_cycles = False
-
-        for entry_name, scene_entry in scene_data.items():
-            effect = self._resolve_effect(scene_entry)
-            if not effect or "pattern" not in effect:
-                continue
-
-            if effect.get("cycles") is not None:
-                has_any_cycles = True
-                state_key = scene_name + "::" + entry_name
-                state = self.scene_state.get(state_key, {})
-                if not state.get("finished"):
-                    return False
-
-        return has_any_cycles
-
-    @property
-    def scene_finished(self) -> bool:
-        """Return True if every active scene with cycle-limited effects has finished."""
-
-        if not self._active_scenes:
-            return False
-
-        return all(self._is_scene_finished(s) for s in self._active_scenes)
-
-    def is_scene_ongoing(self, scene_name: str) -> bool:
-        """Return True if the scene has no cycle-limited effects.
-
-        An ongoing scene never finishes on its own. An immediate scene has at
-        least one effect with a ``cycles`` setting and will eventually finish.
-        """
-
-        scene_data = self.settings["scenes"].get(scene_name, {})
-
-        for name, scene_entry in scene_data.items():
-            effect = self._resolve_effect(scene_entry)
-            if not effect or "pattern" not in effect:
-                continue
-
-            if effect.get("cycles") is not None:
-                return False
-
-        return True
-
-    def get_logical_color(self, index: int) -> tuple:
-        """Return the pre-scaled logical color for the given LED index."""
-
-        if 0 <= index < len(self.logical_colors):
-            return self.logical_colors[index]
-
-        return (0, 0, 0)
-
-    def _resolve_effect(self, scene_entry: dict) -> dict:
-        """Resolve a scene entry into a full effect dict with pattern, colors, target, etc.
-
-        Supports two formats:
-        - New format: {"effect": "EffectName", "target": "..."} — looks up the effect by name
-        - Legacy format: {"pattern": "solid", "target": "...", "colors": [...]} — used directly
-
-        Returns a merged dict with the target from the scene entry and all other fields from the effect.
-        """
-
-        if "effect" in scene_entry:
-            effect_name = scene_entry["effect"]
-            effects_dict = self.settings.get("effects", {})
-            if effect_name not in effects_dict:
-                return {}
-
-            resolved = dict(effects_dict[effect_name])
-            resolved["target"] = scene_entry.get("target", "all")
-
-            if "cycles" in scene_entry:
-                resolved["cycles"] = scene_entry["cycles"]
-
-            return resolved
-
-        return scene_entry
-
-    def _count_cycle(self, name: str, effect: dict) -> None:
-        """Record that the named effect has completed one cycle.
-
-        If the effect has a ``cycles`` setting, decrement the remaining counter
-        in ``scene_state`` and mark the effect as finished when it reaches zero.
-        """
-
-        cycles = effect.get("cycles", None)
-        if cycles is None:
-            return
-
-        if name not in self.scene_state:
-            self.scene_state[name] = {"remaining": cycles}
-
-        state = self.scene_state[name]
-        state["remaining"] = state.get("remaining", cycles) - 1
-
-        if state["remaining"] <= 0:
-            state["finished"] = True
-
-    def process_tick(self, tick_number: int):
-        """Process a single tick of the lighting system."""
-
-        updates = {}
-
-        for active_scene_name in self._active_scenes:
-            scene_start = self._scene_start_ticks.get(active_scene_name, 0)
-
-            for entry_name, scene_entry in self.settings["scenes"][active_scene_name].items():
-                state_key = active_scene_name + "::" + entry_name
-                effect = self._resolve_effect(scene_entry)
-                if not effect or "pattern" not in effect:
-                    continue
-
-                # Skip effects that have finished their cycles.
-                if self.scene_state.get(state_key, {}).get("finished"):
-                    continue
-
-                # Skip effects waiting on a predecessor to finish.
-                after = scene_entry.get("after")
-                if after:
-                    after_key = active_scene_name + "::" + after
-                    predecessor_state = self.scene_state.get(after_key, {})
-                    if not predecessor_state.get("finished"):
-                        continue
-
-                    # Record the tick this effect became active.
-                    if state_key not in self.scene_state:
-                        self.scene_state[state_key] = {"start_tick": tick_number}
-                    elif "start_tick" not in self.scene_state[state_key]:
-                        self.scene_state[state_key]["start_tick"] = tick_number
-
-                    # Apply inherited target from predecessor's passthrough data.
-                    if scene_entry.get("inherit_target"):
-                        passthrough = predecessor_state.get("passthrough", {})
-                        if "target" in passthrough:
-                            effect = dict(effect)
-                            effect["target"] = passthrough["target"]
-
-                # Compute a local tick number relative to when this effect started.
-                start_tick = self.scene_state.get(state_key, {}).get("start_tick", scene_start)
-                local_tick = tick_number - start_tick
-
-                pattern_name = "pattern_" + effect["pattern"]
-                if hasattr(self, pattern_name):
-                    func = getattr(self, pattern_name)
-                    result = func(name=state_key, effect=effect, tick_number=local_tick)
-                    target_colors = result
-
-                    # If the effect just finished, store its target as passthrough
-                    # for any chained successor. Patterns like phaser_strip may set
-                    # a more specific passthrough; this preserves that.
-                    state = self.scene_state.get(state_key, {})
-                    if state.get("finished") and "passthrough" not in state:
-                        state["passthrough"] = {"target": effect["target"]}
-
-                    # Apply filters if present.
-                    if "filters" in effect:
-                        stored_filters = self.settings.get("filters", {})
-                        filtered_colors = target_colors
-
-                        for filter_ref in effect["filters"]:
-                            # Resolve named filter reference to its definition dict.
-                            if isinstance(filter_ref, str):
-                                filter_dict = stored_filters.get(filter_ref)
-                                if not filter_dict:
-                                    continue
-
-                            else:
-                                filter_dict = filter_ref
-
-                            filter_name = "filter_" + filter_dict["filter"]
-                            if hasattr(self, filter_name):
-                                filter_func = getattr(self, filter_name)
-                                transient_target_groups_set = False
-                                if filter_dict.get("filter") in ("spike", "dropout"):
-                                    filter_dict["_target_groups"] = self._target_component_groups(effect.get("target"))
-                                    transient_target_groups_set = True
-
-                                filter_result = filter_func(filter_dict, filtered_colors, tick_number=tick_number)
-
-                                if transient_target_groups_set and "_target_groups" in filter_dict:
-                                    del filter_dict["_target_groups"]
-
-                                if filter_result is not None:
-                                    filtered_colors = filter_result
-
-                        result = filtered_colors
-
-                    if result:
-                        for led_index, color in result:
-                            updates[led_index] = color
-
-        for led_index, color in updates.items():
-            self.logical_colors[led_index] = color
-            self.leds.set(led_index, color)
-
-        # Remove finished immediate scenes from the active set.
-        for active_scene_name in list(self._active_scenes):
-            if self._is_scene_finished(active_scene_name):
-                self.remove_scene(active_scene_name)
-
-        try:
-            self.leds.show()
-        except Exception as e:
-            print(f"lighting: leds.show() failed: {e}")
-
     def get_color(self, input: str | tuple | list) -> tuple[int, int, int]:
-        """Resolve a color input to an RGB tuple.
-
-        Accepts:
-        - ``"name"`` — a standard named color from the colors dict
-        - ``"custom:name"`` — a custom color stored in settings
-        - ``(r, g, b)`` tuple or list — returned as-is (list wrapped in a list)
-        """
+        """Resolve a color input to an RGB tuple."""
 
         if isinstance(input, str):
             if input.startswith("custom:"):
@@ -738,17 +386,13 @@ class Lighting:
 
             return colors.get(input, (255, 255, 255))
 
-        elif isinstance(input, list):
+        if isinstance(input, list):
             return [self.get_color(color) for color in input]
 
         return input
 
     def get_targets(self, target, _visited=None):
-        """Return a list of target indices for the given target specification.
-
-        Supports nested named ranges and will avoid infinite recursion by
-        tracking visited named-range names.
-        """
+        """Return a list of target indices for the given target specification."""
 
         if _visited is None:
             _visited = set()
@@ -772,7 +416,6 @@ class Lighting:
             return result
 
         if isinstance(target, str):
-            # Check for named range reference
             if target.startswith("named:"):
                 range_name = target[6:]
                 if range_name in _visited:
@@ -787,7 +430,6 @@ class Lighting:
                     return result
                 return []
 
-            # Check for range notation (e.g., "0-14")
             if "-" in target:
                 try:
                     start, end = map(int, target.split("-"))
@@ -797,13 +439,11 @@ class Lighting:
                     _append_unique(i)
                 return result
 
-            # Check for "all"
             if target == "all":
                 for i in range(self.leds.count):
                     _append_unique(i)
                 return result
 
-            # Plain integer string (e.g., "10" from a web form)
             try:
                 _append_unique(int(target))
                 return result
@@ -812,669 +452,13 @@ class Lighting:
 
         return []
 
-    def _linear_color(self, color_1, color_2, phase):
-        """Linearly interpolate between two RGB colors by phase (0.0–1.0)."""
-
-        return (
-            int(color_1[0] * (1 - phase) + color_2[0] * phase),
-            int(color_1[1] * (1 - phase) + color_2[1] * phase),
-            int(color_1[2] * (1 - phase) + color_2[2] * phase),
-        )
-
-    def _set_targets(self, targets: list, color: tuple) -> list:
-        """Return (led_index, color) pairs for all targets."""
-
-        return [(target, color) for target in targets]
-
-    def filter_null(self, filter_dict: dict, leds: list, tick_number: int) -> list:
-        """Null filter: returns the LED list unaltered."""
-
-        return leds
-
-    def filter_brightness(self, filter_dict: dict, leds: list, tick_number: int) -> list:
-        """Brightness filter: scale each RGB channel by a constant multiplier.
-
-        The result of each channel is clamped to the inclusive range 0..255
-        and returned as an integer.
-        """
-
-        if not leds:
-            return leds
-
-        try:
-            brightness_multiplier = float(filter_dict.get("brightness", 1.0))
-        except (TypeError, ValueError):
-            brightness_multiplier = 1.0
-
-        result = []
-        for led_index, target_color in leds:
-            new_red = max(0, min(255, int(target_color[0] * brightness_multiplier)))
-            new_green = max(0, min(255, int(target_color[1] * brightness_multiplier)))
-            new_blue = max(0, min(255, int(target_color[2] * brightness_multiplier)))
-            result.append((led_index, (new_red, new_green, new_blue)))
-
-        return result
-
-    def filter_sizzle(self, filter_dict: dict, leds: list, tick_number: int) -> list:
-        """Sizzle filter: applies a uniform random deviation to all LEDs.
-
-        Generates a single random offset per channel and applies it to every LED's
-        target color. The deviation is bounded by ``variation`` and stepped by ``heat``.
-        Updates only on ticks divisible by ``40 // frequency``.
-        """
-
-        if not leds:
-            return leds
-
-        frequency = filter_dict.get("frequency", 40)
-        heat = filter_dict.get("heat", 10)
-
-        interval = 40 // frequency
-
-        # Only update on the appropriate ticks.
-        if tick_number % interval != 0:
-            return leds
-
-        # Generate one random deviation per channel.
-        dev_red = random.randint(-heat, heat)
-        dev_green = random.randint(-heat, heat)
-        dev_blue = random.randint(-heat, heat)
-
-        # Apply the same deviation to all LEDs' target colors.
-        result = []
-        for led_index, target_color in leds:
-            new_red = max(0, min(255, target_color[0] + dev_red))
-            new_green = max(0, min(255, target_color[1] + dev_green))
-            new_blue = max(0, min(255, target_color[2] + dev_blue))
-            result.append((led_index, (new_red, new_green, new_blue)))
-
-        return result
-
-    def filter_scintillate(self, filter_dict: dict, leds: list, tick_number: int) -> list:
-        """Scintillate filter: applies independent random deviations to each LED.
-
-        Each LED gets its own random offset per channel, bounded by ``variation``
-        and stepped by ``heat``. Updates only on ticks divisible by ``40 // frequency``.
-        """
-
-        if not leds:
-            return leds
-
-        frequency = filter_dict.get("frequency", 40)
-        heat = filter_dict.get("heat", 10)
-
-        interval = 40 // frequency
-
-        # Only update on the appropriate ticks.
-        if tick_number % interval != 0:
-            return leds
-
-        result = []
-        for led_index, target_color in leds:
-            dev_red = random.randint(-heat, heat)
-            dev_green = random.randint(-heat, heat)
-            dev_blue = random.randint(-heat, heat)
-
-            new_red = max(0, min(255, target_color[0] + dev_red))
-            new_green = max(0, min(255, target_color[1] + dev_green))
-            new_blue = max(0, min(255, target_color[2] + dev_blue))
-            result.append((led_index, (new_red, new_green, new_blue)))
-
-        return result
-
-    def _find_contiguous_groups(self, leds: list) -> list:
-        """Split a list of (led_index, color) pairs into contiguous index groups.
-
-        Each group is a list of consecutive (led_index, color) pairs where
-        led indices are adjacent integers.
-        """
-
-        if not leds:
-            return []
-
-        groups = []
-        current_group = [leds[0]]
-
-        for i in range(1, len(leds)):
-            if leds[i][0] == leds[i - 1][0] + 1:
-                current_group.append(leds[i])
-            else:
-                groups.append(current_group)
-                current_group = [leds[i]]
-
-        groups.append(current_group)
-
-        return groups
-
-    def _target_component_groups(self, target: object) -> list:
-        """Return explicit target component groups when the target is an aggregate named range.
-
-        If ``target`` is ``named:<range>`` and that named range is a list,
-        returns one resolved LED-index group per list element. This preserves
-        component boundaries for filters that operate on grouped targets.
-        """
-
-        if not isinstance(target, str) or not target.startswith("named:"):
-            return []
-
-        range_name = target[6:]
-        named_ranges = self.settings.get("named_ranges", {})
-        group_spec = named_ranges.get(range_name)
-        if not isinstance(group_spec, list):
-            return []
-
-        groups = []
-        for item in group_spec:
-            group_targets = self.get_targets(item)
-            if group_targets:
-                groups.append(group_targets)
-
-        return groups
-
-    def _apply_spike_filter(
-        self,
-        filter_dict: dict,
-        leds: list,
-        tick_number: int,
-        spike_color: tuple,
-    ) -> list:
-        """Shared implementation for spike and dropout filters.
-
-        Tracks per-group state inside filter_dict['_state']. Groups are
-        determined by the 'scope' parameter: 'all' (one group), 'subranges'
-        (contiguous index runs), or 'leds' (each LED independently).
-
-        Each group fires a spike, then schedules the next one to start
-        ``period`` ± ``variation`` ticks after that spike ends. The spike
-        itself lasts ``duration`` ± ``heat`` ticks.
-        """
-
-        if not leds:
-            return leds
-
-        duration = int(filter_dict.get("duration", 5))
-        period = int(filter_dict.get("period", 40))
-        variation = int(filter_dict.get("variation", 0))
-        heat = int(filter_dict.get("heat", 0))
-        scope = filter_dict.get("scope", "all")
-
-        if "_state" not in filter_dict:
-            filter_dict["_state"] = {}
-
-        state = filter_dict["_state"]
-
-        if scope == "all":
-            groups = [leds]
-        elif scope == "subranges":
-            explicit_groups = filter_dict.get("_target_groups", [])
-            if explicit_groups:
-                # Preserve explicit component groups when provided by caller.
-                # This keeps adjacent components independent (for example,
-                # named range aggregates like Thruster Left/Right).
-                led_lookup = {led_index: (led_index, target_color) for led_index, target_color in leds}
-                groups = []
-                for target_group in explicit_groups:
-                    group = []
-                    for led_index in target_group:
-                        if led_index in led_lookup:
-                            group.append(led_lookup[led_index])
-                    if group:
-                        groups.append(group)
-
-                if not groups:
-                    groups = self._find_contiguous_groups(leds)
-            else:
-                groups = self._find_contiguous_groups(leds)
-        else:
-            groups = [[led] for led in leds]
-
-        result = []
-
-        for group_index, group in enumerate(groups):
-            group_key = str(group_index)
-
-            if group_key not in state:
-                variation_offset = random.randint(-variation, variation) if variation > 0 else 0
-                # For multi-group scopes, stagger initial start times so
-                # groups do not lockstep when variation is zero.
-                initial_phase_offset = 0
-                if scope != "all" and period > 1:
-                    initial_phase_offset = random.randint(0, period - 1)
-                state[group_key] = {
-                    "next_spike": tick_number + period + variation_offset + initial_phase_offset,
-                    "spike_end": -1,
-                }
-
-            group_state = state[group_key]
-
-            # Start a new spike when the scheduled tick arrives and none is active.
-            if tick_number >= group_state["next_spike"] and tick_number > group_state["spike_end"]:
-                heat_offset = random.randint(-heat, heat) if heat > 0 else 0
-                spike_duration = max(1, duration + heat_offset)
-                group_state["spike_end"] = tick_number + spike_duration - 1
-                variation_offset = random.randint(-variation, variation) if variation > 0 else 0
-                # Reset the timer from the end of the current spike to avoid
-                # back-to-back retriggers when duration exceeds period.
-                group_state["next_spike"] = group_state["spike_end"] + 1 + period + variation_offset
-
-            active = tick_number <= group_state["spike_end"]
-
-            for led_index, target_color in group:
-                result.append((led_index, spike_color if active else target_color))
-
-        return result
-
-    def filter_spike(self, filter_dict: dict, leds: list, tick_number: int) -> list:
-        """Spike filter: periodically overrides LED color with a configurable spike color.
-
-        Parameters (all optional):
-            color: spike color name or RGB tuple (default: white)
-            duration: ticks the spike lasts (default: 5)
-            period: ticks between spike starts (default: 40)
-            variation: random ± ticks applied to the period (default: 0)
-            heat: random ± ticks added to the spike duration (default: 0)
-            scope: 'all', 'subranges', or 'leds' (default: 'all')
-        """
-
-        spike_color = self.get_color(filter_dict.get("color", "white"))
-
-        return self._apply_spike_filter(filter_dict, leds, tick_number, spike_color)
-
-    def filter_dropout(self, filter_dict: dict, leds: list, tick_number: int) -> list:
-        """Dropout filter: periodically overrides LED color with black.
-
-        Identical to the spike filter but the spike color is always black.
-
-        Parameters (all optional):
-            duration: ticks the dropout lasts (default: 5)
-            period: ticks between dropout starts (default: 40)
-            variation: random ± ticks applied to the period (default: 0)
-            heat: random ± ticks added to the dropout duration (default: 0)
-            scope: 'all', 'subranges', or 'leds' (default: 'all')
-        """
-
-        return self._apply_spike_filter(filter_dict, leds, tick_number, (0, 0, 0))
-
-    def _get_effect_colors(self, effect: dict, count: int = 1) -> list:
-        """Return a list of resolved RGB tuples for the effect's colors.
-
-        Falls back to white/black if colors are missing or fewer than needed.
-        """
-
-        defaults = [(255, 255, 255), (0, 0, 0)]
-        raw = effect.get("colors", [])
-        resolved = self.get_color(raw) if raw else []
-
-        if not isinstance(resolved, list):
-            resolved = [resolved]
-
-        while len(resolved) < count:
-            resolved.append(defaults[len(resolved) % len(defaults)])
-
-        return resolved
-
-    def pattern_solid(self, name: str, effect: dict, tick_number: int) -> list:
-        """Simple solid color function for a lighting effect."""
-
-        effect_colors = self._get_effect_colors(effect, 1)
-        return self._set_targets(self.get_targets(effect["target"]), effect_colors[0])
-
-    def pattern_blink(self, name: str, effect: dict, tick_number: int) -> list:
-        """Simple blink function for a lighting effect."""
-        # Determine half-period (on-duration) in ticks. Backwards-compatible
-        # support: older configs may use "duration" (ticks). Newer configs
-        # can provide "frequency" (blinks per second). If both are present,
-        # "frequency" takes precedence.
-        half_period = effect.get("duration", 40)
-        if "frequency" in effect:
-            try:
-                freq = float(effect.get("frequency", 0))
-                if freq > 0:
-                    # 40 ticks per second; half-period = (ticks/sec) / (2*freq)
-                    half_period = max(1, int(round(20.0 / freq)))
-            except Exception:
-                # Leave half_period as-is if parsing fails
-                pass
-        effect_colors = self._get_effect_colors(effect, 2)
-
-        return self.pattern_periodic(
-            name=name,
-            effect=effect,
-            tick_number=tick_number,
-            interval=half_period,
-            duration=half_period,
-            colors=effect_colors,
-            targets=self.get_targets(effect["target"]),
-        )
-
-    def pattern_pulse(self, name: str, effect: dict, tick_number: int) -> list:
-        """Simple pulse function for a lighting effect."""
-
-        on_ticks = effect.get("duration", 10)
-        period = effect.get("period", 40)
-        interval = max(0, period - on_ticks)
-        effect_colors = self._get_effect_colors(effect, 2)
-
-        return self.pattern_periodic(
-            name=name,
-            effect=effect,
-            tick_number=tick_number,
-            interval=interval,
-            duration=on_ticks,
-            colors=effect_colors,
-            targets=self.get_targets(effect["target"]),
-        )
-
-    def pattern_periodic(
-        self,
-        name: str,
-        effect: dict,
-        tick_number: int,
-        interval: int,
-        duration: int,
-        colors: list,
-        targets: list,
-    ) -> list:
-        """Periodic on/off function for a lighting effect."""
-
-        cycle_length = duration + interval
-        phase = tick_number % cycle_length
-
-        if phase == 0 and tick_number > 0:
-            self._count_cycle(name, effect)
-
-        color = colors[0] if phase < duration else colors[1]
-
-        return [(target, color) for target in targets]
-
-    def pattern_fade_in(self, name, effect, tick_number) -> list:
-        """Simple fade in function for a lighting effect."""
-
-        effect_colors = self._get_effect_colors(effect, 2)
-        targets = self.get_targets(effect["target"])
-        fade_duration = effect.get("duration", 40)
-        phase = min(tick_number / fade_duration, 1.0)
-
-        if tick_number == fade_duration:
-            self._count_cycle(name, effect)
-
-        return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
-
-    def pattern_breathe(self, name, effect, tick_number) -> list:
-        """Breathe function: uses sin() to smoothly modulate between two colors."""
-
-        effect_colors = self._get_effect_colors(effect, 2)
-        targets = self.get_targets(effect["target"])
-        cycle_ticks = max(1, effect.get("duration", 40))
-        phase = (math.sin(2 * math.pi * tick_number / cycle_ticks) + 1) / 2
-
-        if tick_number > 0 and (tick_number - 1) % cycle_ticks == cycle_ticks - 1:
-            self._count_cycle(name, effect)
-
-        return self._set_targets(targets, self._linear_color(effect_colors[0], effect_colors[1], phase))
-
-    def _wave_head_position(self, num_leds: int, cycle_ticks: int, phase: int, reverse: bool) -> float:
-        """Return the head LED position (as a float) for a wave at the given phase.
-
-        Allows sub-pixel rendering for smoother animation.
-        """
-
-        if cycle_ticks > 1:
-            position = phase * (num_leds - 1) / (cycle_ticks - 1)
-        else:
-            position = float(num_leds - 1)
-
-        if reverse:
-            position = (num_leds - 1) - position
-
-        return position
-
-    def _render_wave(
-        self,
-        targets: list,
-        head_positions: list,
-        width: int,
-        ticks_per_led: float,
-        color1: tuple,
-        color2: tuple,
-        reverse: bool = False,
-    ) -> list:
-        """Render one or more wave comets with sub-pixel smoothing and return (led_index, color) pairs.
-
-        Head positions can be fractional for smooth animation. Colors are interpolated
-        across adjacent LEDs at the head boundary. If reverse=True, the tail extends
-        forward (higher indices) instead of backward.
-        """
-
-        fade_ticks = max(1, width * ticks_per_led)
-        step_r = (color2[0] - color1[0]) / fade_ticks
-        step_g = (color2[1] - color1[1]) / fade_ticks
-        step_b = (color2[2] - color1[2]) / fade_ticks
-
-        lo_r, hi_r = min(color1[0], color2[0]), max(color1[0], color2[0])
-        lo_g, hi_g = min(color1[1], color2[1]), max(color1[1], color2[1])
-        lo_b, hi_b = min(color1[2], color2[2]), max(color1[2], color2[2])
-
-        updates = {}
-
-        # Phase 1: fade every LED one step toward color1.
-        for i, target in enumerate(targets):
-            current = self.get_logical_color(target)
-
-            updates[i] = (
-                target,
-                (
-                    int(max(lo_r, min(hi_r, current[0] - step_r))),
-                    int(max(lo_g, min(hi_g, current[1] - step_g))),
-                    int(max(lo_b, min(hi_b, current[2] - step_b))),
-                ),
-            )
-
-        # How many LEDs the head can move in a single tick. When > 1, we must
-        # fill the gap so no LEDs are skipped.
-        fill_count = max(1, math.ceil(1 / ticks_per_led)) if ticks_per_led > 0 else 1
-
-        # Phase 2: place head at full brightness and blend the transition smoothly.
-        for head_position in head_positions:
-            if not reverse:
-                # Forward: head_index is floor(position), sub_position is fractional part
-                head_index = int(head_position)
-                sub_position = head_position - head_index  # 0.0 to 1.0
-            else:
-                # Reverse: head_index is ceil(position), sub_position is distance from ceil
-                # This ensures smooth blending as position decreases
-                head_index = math.ceil(head_position)
-                sub_position = head_index - head_position  # 0.0 to 1.0
-
-            if 0 <= head_index < len(targets):
-                # Fill head LED and any LEDs skipped since last tick.
-                for offset in range(fill_count):
-                    fill_idx = head_index - offset if not reverse else head_index + offset
-
-                    if 0 <= fill_idx < len(targets):
-                        updates[fill_idx] = (targets[fill_idx], color2)
-
-                # Smooth transition: blend into the next LED for sub-pixel smoothing
-                # Direction depends on reverse flag
-                if not reverse:
-                    # Forward: tail extends forward (higher indices)
-                    if head_index + 1 < len(targets) and sub_position > 0:
-                        blend_color = self._linear_color(color1, color2, sub_position)
-                        updates[head_index + 1] = (targets[head_index + 1], blend_color)
-
-                else:
-                    # Reverse: tail extends backward (lower indices)
-                    if head_index - 1 >= 0 and sub_position > 0:
-                        blend_color = self._linear_color(color1, color2, sub_position)
-                        updates[head_index - 1] = (targets[head_index - 1], blend_color)
-
-        return list(updates.values())
-
-    def pattern_wave(self, name: str, effect: dict, tick_number: int) -> list:
-        """Wave function: creates one or more moving comet effects across the LEDs.
-
-        effect["number"] controls how many evenly-spaced peaks travel simultaneously.
-        Set effect["reverse"] to True to sweep from last to first.
-        """
-
-        effect_colors = self._get_effect_colors(effect, 2)
-        targets = self.get_targets(effect["target"])
-        width = effect.get("width", 5)
-        reverse = effect.get("reverse", False)
-        number = effect.get("number", 1)
-
-        num_leds = len(targets)
-        cycle_ticks = max(1, effect.get("duration", 40))
-        phase = (tick_number - 1) % cycle_ticks
-        ticks_per_led = cycle_ticks / max(1, num_leds - 1)
-
-        if phase == 0 and tick_number > 1:
-            self._count_cycle(name, effect)
-            if self.scene_state.get(name, {}).get("finished"):
-                return self._set_targets(targets, effect_colors[0])
-
-        spacing = cycle_ticks // number
-        head_positions = [
-            self._wave_head_position(num_leds, cycle_ticks, (phase + peak * spacing) % cycle_ticks, reverse)
-            for peak in range(number)
-        ]
-
-        return self._render_wave(
-            targets, head_positions, width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=reverse
-        )
-
-    def pattern_cylon(self, name, effect, tick_number) -> list:
-        """Cylon function: a comet that bounces back and forth across the LEDs.
-
-        The head sweeps from the first target to the last over 40/frequency ticks,
-        then reverses and sweeps back, repeating continuously.
-        """
-
-        effect_colors = self._get_effect_colors(effect, 2)
-        targets = self.get_targets(effect["target"])
-        width = effect.get("width", 5)
-
-        num_leds = len(targets)
-        one_way_ticks = max(1, effect.get("duration", 40))
-        cycle_ticks = one_way_ticks * 2
-        phase = (tick_number - 1) % cycle_ticks
-        ticks_per_led = one_way_ticks / max(1, num_leds - 1)
-
-        if phase == 0 and tick_number > 1:
-            self._count_cycle(name, effect)
-            if self.scene_state.get(name, {}).get("finished"):
-                return self._set_targets(targets, effect_colors[0])
-
-        if phase < one_way_ticks:
-            head_position = self._wave_head_position(num_leds, one_way_ticks, phase, reverse=False)
-            return self._render_wave(
-                targets, [head_position], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=False
-            )
-        else:
-            head_position = self._wave_head_position(num_leds, one_way_ticks, phase - one_way_ticks, reverse=True)
-            return self._render_wave(
-                targets, [head_position], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=True
-            )
-
-    def pattern_phaser_strip(self, name: str, effect: dict, tick_number: int) -> list:
-        """Phaser strip: two waves start at opposite ends of the target range and converge
-        on a randomly chosen meeting point, both arriving at the same tick.
-
-        After the waves meet, the effect holds the meeting LED lit while all
-        trails fade out, then resets every LED to the background color before
-        the cycle is considered complete.
-
-        A new meeting point is picked at the start of each cycle.
-        """
-
-        effect_colors = self._get_effect_colors(effect, 2)
-        targets = self.get_targets(effect["target"])
-        width = effect.get("width", 5)
-
-        num_leds = len(targets)
-
-        if num_leds < 3:
-            return []
-
-        cycle_ticks = max(1, effect.get("duration", 40))
-        ticks_per_led = cycle_ticks / max(1, num_leds - 1)
-        fade_ticks = int(max(1, width * ticks_per_led))
-        total_ticks = cycle_ticks + fade_ticks
-        phase = (tick_number - 1) % total_ticks
-
-        # Count the cycle at the very last tick of the full sequence.
-        if phase == 0 and tick_number > 1:
-            self._count_cycle(name, effect)
-            if self.scene_state.get(name, {}).get("finished"):
-                meet_index = self.retained_values.get(name, 0)
-                self.scene_state[name]["passthrough"] = {"target": targets[meet_index]}
-                return [(target, effect_colors[0]) for target in targets]
-
-        # Pick a new random meeting point at the start of each full sequence.
-        if name not in self.retained_values or phase == 0:
-            meet_index = random.randint(1, num_leds - 2)
-            self.retained_values[name] = meet_index
-        else:
-            meet_index = self.retained_values[name]
-
-        # Phase 1: converge — waves travel toward the meeting point.
-        if phase < cycle_ticks:
-            if cycle_ticks > 1:
-                left_pos = phase * meet_index / (cycle_ticks - 1)
-                right_pos = (num_leds - 1) - phase * (num_leds - 1 - meet_index) / (cycle_ticks - 1)
-            else:
-                left_pos = float(meet_index)
-                right_pos = float(meet_index)
-
-            left_updates = self._render_wave(
-                targets, [left_pos], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=False
-            )
-            right_updates = self._render_wave(
-                targets, [right_pos], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=True
-            )
-
-            merged = dict(left_updates)
-
-            for led_index, color in right_updates:
-                if led_index in merged:
-                    if sum(color) > sum(merged[led_index]):
-                        merged[led_index] = color
-                else:
-                    merged[led_index] = color
-
-            return list(merged.items())
-
-        # Phase 2: fade — hold meeting LED, let trails decay naturally.
-        fade_phase = phase - cycle_ticks
-
-        if fade_phase < fade_ticks - 1:
-            # Render a stationary wave at the meeting point so _render_wave
-            # continues to fade all other LEDs toward color1 each tick.
-            return self._render_wave(
-                targets, [float(meet_index)], width, ticks_per_led, effect_colors[0], effect_colors[1], reverse=False
-            )
-
-        # Final tick: reset all LEDs to the background color.
-        return [(target, effect_colors[0]) for target in targets]
-
     def convert_frequencies_to_durations(self) -> int:
-        """Convert all frequency-based pattern params to duration-based in persistent storage.
-
-        For each effect or inline scene entry that has a ``frequency`` key, computes
-        ``duration = max(1, int(40 // frequency))`` and replaces the key in-place.
-        For ``pulse`` effects, the cycle-period ``frequency`` becomes ``period`` instead,
-        since ``duration`` is already used for the on-time.
-
-        Returns the total number of values converted. Saves storage if any conversions
-        were made.
-        """
+        """Convert all frequency-based pattern params to duration-based in persistent storage."""
 
         count = 0
         lighting_settings = self.settings
 
         def _convert_entry(entry: dict) -> None:
-            """Convert a single effect/entry dict in-place."""
-
             nonlocal count
             if "frequency" not in entry:
                 return
