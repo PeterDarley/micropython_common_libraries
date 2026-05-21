@@ -77,6 +77,14 @@ FILTER_METADATA: dict = {
         "description": "Brightness filter",
         "optional": ["brightness"],
     },
+    "spike": {
+        "description": "Spike filter",
+        "optional": ["color", "duration", "period", "variation", "heat", "scope"],
+    },
+    "dropout": {
+        "description": "Dropout filter (black spike)",
+        "optional": ["duration", "period", "variation", "heat", "scope"],
+    },
 }
 
 
@@ -640,7 +648,15 @@ class Lighting:
                             filter_name = "filter_" + filter_dict["filter"]
                             if hasattr(self, filter_name):
                                 filter_func = getattr(self, filter_name)
+                                transient_target_groups_set = False
+                                if filter_dict.get("filter") in ("spike", "dropout"):
+                                    filter_dict["_target_groups"] = self._target_component_groups(effect.get("target"))
+                                    transient_target_groups_set = True
+
                                 result = filter_func(filter_dict, target_colors, tick_number=tick_number)
+
+                                if transient_target_groups_set and "_target_groups" in filter_dict:
+                                    del filter_dict["_target_groups"]
 
                     if result:
                         for led_index, color in result:
@@ -863,6 +879,179 @@ class Lighting:
             result.append((led_index, (new_red, new_green, new_blue)))
 
         return result
+
+    def _find_contiguous_groups(self, leds: list) -> list:
+        """Split a list of (led_index, color) pairs into contiguous index groups.
+
+        Each group is a list of consecutive (led_index, color) pairs where
+        led indices are adjacent integers.
+        """
+
+        if not leds:
+            return []
+
+        groups = []
+        current_group = [leds[0]]
+
+        for i in range(1, len(leds)):
+            if leds[i][0] == leds[i - 1][0] + 1:
+                current_group.append(leds[i])
+            else:
+                groups.append(current_group)
+                current_group = [leds[i]]
+
+        groups.append(current_group)
+
+        return groups
+
+    def _target_component_groups(self, target: object) -> list:
+        """Return explicit target component groups when the target is an aggregate named range.
+
+        If ``target`` is ``named:<range>`` and that named range is a list,
+        returns one resolved LED-index group per list element. This preserves
+        component boundaries for filters that operate on grouped targets.
+        """
+
+        if not isinstance(target, str) or not target.startswith("named:"):
+            return []
+
+        range_name = target[6:]
+        named_ranges = self.settings.get("named_ranges", {})
+        group_spec = named_ranges.get(range_name)
+        if not isinstance(group_spec, list):
+            return []
+
+        groups = []
+        for item in group_spec:
+            group_targets = self.get_targets(item)
+            if group_targets:
+                groups.append(group_targets)
+
+        return groups
+
+    def _apply_spike_filter(
+        self,
+        filter_dict: dict,
+        leds: list,
+        tick_number: int,
+        spike_color: tuple,
+    ) -> list:
+        """Shared implementation for spike and dropout filters.
+
+        Tracks per-group state inside filter_dict['_state']. Groups are
+        determined by the 'scope' parameter: 'all' (one group), 'subranges'
+        (contiguous index runs), or 'leds' (each LED independently).
+
+        Each group fires a spike, then schedules the next one to start
+        ``period`` ± ``variation`` ticks after that spike ends. The spike
+        itself lasts ``duration`` ± ``heat`` ticks.
+        """
+
+        if not leds:
+            return leds
+
+        duration = int(filter_dict.get("duration", 5))
+        period = int(filter_dict.get("period", 40))
+        variation = int(filter_dict.get("variation", 0))
+        heat = int(filter_dict.get("heat", 0))
+        scope = filter_dict.get("scope", "all")
+
+        if "_state" not in filter_dict:
+            filter_dict["_state"] = {}
+
+        state = filter_dict["_state"]
+
+        if scope == "all":
+            groups = [leds]
+        elif scope == "subranges":
+            explicit_groups = filter_dict.get("_target_groups", [])
+            if explicit_groups:
+                # Preserve explicit component groups when provided by caller.
+                # This keeps adjacent components independent (for example,
+                # named range aggregates like Thruster Left/Right).
+                led_lookup = {led_index: (led_index, target_color) for led_index, target_color in leds}
+                groups = []
+                for target_group in explicit_groups:
+                    group = []
+                    for led_index in target_group:
+                        if led_index in led_lookup:
+                            group.append(led_lookup[led_index])
+                    if group:
+                        groups.append(group)
+
+                if not groups:
+                    groups = self._find_contiguous_groups(leds)
+            else:
+                groups = self._find_contiguous_groups(leds)
+        else:
+            groups = [[led] for led in leds]
+
+        result = []
+
+        for group_index, group in enumerate(groups):
+            group_key = str(group_index)
+
+            if group_key not in state:
+                variation_offset = random.randint(-variation, variation) if variation > 0 else 0
+                # For multi-group scopes, stagger initial start times so
+                # groups do not lockstep when variation is zero.
+                initial_phase_offset = 0
+                if scope != "all" and period > 1:
+                    initial_phase_offset = random.randint(0, period - 1)
+                state[group_key] = {
+                    "next_spike": tick_number + period + variation_offset + initial_phase_offset,
+                    "spike_end": -1,
+                }
+
+            group_state = state[group_key]
+
+            # Start a new spike when the scheduled tick arrives and none is active.
+            if tick_number >= group_state["next_spike"] and tick_number > group_state["spike_end"]:
+                heat_offset = random.randint(-heat, heat) if heat > 0 else 0
+                spike_duration = max(1, duration + heat_offset)
+                group_state["spike_end"] = tick_number + spike_duration - 1
+                variation_offset = random.randint(-variation, variation) if variation > 0 else 0
+                # Reset the timer from the end of the current spike to avoid
+                # back-to-back retriggers when duration exceeds period.
+                group_state["next_spike"] = group_state["spike_end"] + 1 + period + variation_offset
+
+            active = tick_number <= group_state["spike_end"]
+
+            for led_index, target_color in group:
+                result.append((led_index, spike_color if active else target_color))
+
+        return result
+
+    def filter_spike(self, filter_dict: dict, leds: list, tick_number: int) -> list:
+        """Spike filter: periodically overrides LED color with a configurable spike color.
+
+        Parameters (all optional):
+            color: spike color name or RGB tuple (default: white)
+            duration: ticks the spike lasts (default: 5)
+            period: ticks between spike starts (default: 40)
+            variation: random ± ticks applied to the period (default: 0)
+            heat: random ± ticks added to the spike duration (default: 0)
+            scope: 'all', 'subranges', or 'leds' (default: 'all')
+        """
+
+        spike_color = self.get_color(filter_dict.get("color", "white"))
+
+        return self._apply_spike_filter(filter_dict, leds, tick_number, spike_color)
+
+    def filter_dropout(self, filter_dict: dict, leds: list, tick_number: int) -> list:
+        """Dropout filter: periodically overrides LED color with black.
+
+        Identical to the spike filter but the spike color is always black.
+
+        Parameters (all optional):
+            duration: ticks the dropout lasts (default: 5)
+            period: ticks between dropout starts (default: 40)
+            variation: random ± ticks applied to the period (default: 0)
+            heat: random ± ticks added to the dropout duration (default: 0)
+            scope: 'all', 'subranges', or 'leds' (default: 'all')
+        """
+
+        return self._apply_spike_filter(filter_dict, leds, tick_number, (0, 0, 0))
 
     def _get_effect_colors(self, effect: dict, count: int = 1) -> list:
         """Return a list of resolved RGB tuples for the effect's colors.
