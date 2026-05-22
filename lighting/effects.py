@@ -4,6 +4,59 @@
 class EffectRuntimeMixin:
     """Provides effect resolution and per-tick execution."""
 
+    def _log_effect_start(self, scene_name: str, entry_name: str, effect: dict, tick_number: int) -> None:
+        """Print a one-shot debug line when an effect starts running."""
+
+        pattern_name: str = str(effect.get("pattern", "?"))
+        target: object = effect.get("target", "all")
+        print(
+            "lighting: effect start"
+            f" scene={scene_name}"
+            f" entry={entry_name}"
+            f" pattern={pattern_name}"
+            f" target={target}"
+            f" tick={tick_number}"
+        )
+
+    def _log_effect_end(
+        self,
+        scene_name: str,
+        entry_name: str,
+        effect: dict,
+        tick_number: int,
+        reason: str,
+    ) -> None:
+        """Print a one-shot debug line when an effect ends."""
+
+        pattern_name: str = str(effect.get("pattern", "?"))
+        target: object = effect.get("target", "all")
+        print(
+            "lighting: effect end"
+            f" scene={scene_name}"
+            f" entry={entry_name}"
+            f" pattern={pattern_name}"
+            f" target={target}"
+            f" reason={reason}"
+            f" tick={tick_number}"
+        )
+
+    def _log_scene_effect_endings(self, scene_name: str, reason: str, tick_number: int = -1) -> None:
+        """Log end lines for any started effects in a scene that have not already ended."""
+
+        scene_data: dict = self.settings.get("scenes", {}).get(scene_name, {})
+        for entry_name, scene_entry in scene_data.items():
+            state_key: str = scene_name + "::" + entry_name
+            state: dict = self.scene_state.get(state_key, {})
+            if not state.get("_debug_started") or state.get("_debug_finished"):
+                continue
+
+            effect: dict = self._resolve_effect(scene_entry)
+            if not effect or "pattern" not in effect:
+                continue
+
+            state["_debug_finished"] = True
+            self._log_effect_end(scene_name, entry_name, effect, tick_number=tick_number, reason=reason)
+
     def _is_scene_finished(self, scene_name: str) -> bool:
         """Return True if all cycle-limited effects in the given scene have finished."""
 
@@ -15,12 +68,16 @@ class EffectRuntimeMixin:
             if not effect or "pattern" not in effect:
                 continue
 
-            if effect.get("cycles") is not None:
-                has_any_cycles = True
-                state_key = scene_name + "::" + entry_name
-                state = self.scene_state.get(state_key, {})
-                if not state.get("finished"):
-                    return False
+            # Any effect without an explicit cycles limit is ongoing by design,
+            # so the scene should never be considered finished automatically.
+            if effect.get("cycles") is None:
+                return False
+
+            has_any_cycles = True
+            state_key = scene_name + "::" + entry_name
+            state = self.scene_state.get(state_key, {})
+            if not state.get("finished"):
+                return False
 
         return has_any_cycles
 
@@ -34,19 +91,23 @@ class EffectRuntimeMixin:
         return all(self._is_scene_finished(s) for s in self._active_scenes)
 
     def is_scene_ongoing(self, scene_name: str) -> bool:
-        """Return True if the scene has no cycle-limited effects."""
+        """Return True if the scene includes at least one non-terminating effect."""
 
         scene_data = self.settings["scenes"].get(scene_name, {})
+        has_cycle_limited_effect = False
 
         for name, scene_entry in scene_data.items():
             effect = self._resolve_effect(scene_entry)
             if not effect or "pattern" not in effect:
                 continue
 
-            if effect.get("cycles") is not None:
-                return False
+            if effect.get("cycles") is None:
+                return True
 
-        return True
+            has_cycle_limited_effect = True
+
+        # Preserve previous behavior for empty/malformed scenes: treat them as ongoing.
+        return not has_cycle_limited_effect
 
     def get_logical_color(self, index: int) -> tuple:
         """Return the pre-scaled logical color for the given LED index."""
@@ -90,6 +151,14 @@ class EffectRuntimeMixin:
 
         if state["remaining"] <= 0:
             state["finished"] = True
+            if not state.get("_debug_finished"):
+                state["_debug_finished"] = True
+                if "::" in name:
+                    scene_name, entry_name = name.split("::", 1)
+                else:
+                    scene_name, entry_name = "?", name
+                tick_number: int = self.animation.tick_number if hasattr(self, "animation") else -1
+                self._log_effect_end(scene_name, entry_name, effect, tick_number=tick_number, reason="cycles-complete")
 
     def process_tick(self, tick_number: int):
         """Process a single tick of the lighting system."""
@@ -128,6 +197,15 @@ class EffectRuntimeMixin:
 
                 start_tick = self.scene_state.get(state_key, {}).get("start_tick", scene_start)
                 local_tick = tick_number - start_tick
+
+                state = self.scene_state.get(state_key)
+                if state is None:
+                    self.scene_state[state_key] = {}
+                    state = self.scene_state[state_key]
+
+                if not state.get("_debug_started"):
+                    state["_debug_started"] = True
+                    self._log_effect_start(active_scene_name, entry_name, effect, tick_number=tick_number)
 
                 pattern_name = "pattern_" + effect["pattern"]
                 if hasattr(self, pattern_name):

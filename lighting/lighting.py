@@ -308,6 +308,11 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
         if self._active_scenes == [resolved] and not kwargs and not self.scene_finished:
             return
 
+        if hasattr(self, "_log_scene_effect_endings"):
+            tick_number = self.animation.tick_number if hasattr(self, "animation") else -1
+            for active_scene_name in list(self._active_scenes):
+                self._log_scene_effect_endings(active_scene_name, reason="scene-replaced", tick_number=tick_number)
+
         self._clear_runtime_filter_state()
 
         self._active_scenes = [resolved]
@@ -352,6 +357,10 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
 
         if scene_name not in self._active_scenes:
             return
+
+        if hasattr(self, "_log_scene_effect_endings"):
+            tick_number = self.animation.tick_number if hasattr(self, "animation") else -1
+            self._log_scene_effect_endings(scene_name, reason="scene-removed", tick_number=tick_number)
 
         self._active_scenes.remove(scene_name)
         self._scene_start_ticks.pop(scene_name, None)
