@@ -58,11 +58,11 @@ FILTER_METADATA: dict = {
     },
     "sizzle": {
         "description": "Sizzle filter",
-        "optional": ["frequency", "variation", "heat"],
+        "optional": ["frequency", "variation_percent", "heat"],
     },
     "scintillate": {
         "description": "Scintillate filter",
-        "optional": ["frequency", "variation", "heat"],
+        "optional": ["frequency", "variation_percent", "heat"],
     },
     "brightness": {
         "description": "Brightness filter",

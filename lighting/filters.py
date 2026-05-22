@@ -6,6 +6,31 @@ import random
 class FilterMixin:
     """Provides filter implementations used by the lighting engine."""
 
+    def _variation_percent(self, filter_dict: dict, default_percent: float = 20.0) -> float:
+        """Return variation percent from config.
+
+        Supports legacy ``variation`` level values for backward compatibility.
+        """
+
+        percent = None
+
+        if "variation_percent" in filter_dict:
+            try:
+                percent = float(filter_dict.get("variation_percent", default_percent))
+            except (TypeError, ValueError):
+                percent = default_percent
+        elif "variation" in filter_dict:
+            try:
+                legacy_levels = float(filter_dict.get("variation", 0))
+            except (TypeError, ValueError):
+                legacy_levels = 0.0
+            percent = (legacy_levels / 255.0) * 100.0
+
+        if percent is None:
+            percent = default_percent
+
+        return max(0.0, min(100.0, percent))
+
     def filter_null(self, filter_dict: dict, leds: list, tick_number: int) -> list:
         """Null filter: returns the LED list unaltered."""
 
@@ -47,22 +72,23 @@ class FilterMixin:
             return leds
 
         frequency = filter_dict.get("frequency", 40)
-        heat = filter_dict.get("heat", 10)
+        variation_percent = self._variation_percent(filter_dict)
+        variation_ratio = variation_percent / 100.0
 
         interval = 40 // frequency
 
         if tick_number % interval != 0:
             return leds
 
-        dev_red = random.randint(-heat, heat)
-        dev_green = random.randint(-heat, heat)
-        dev_blue = random.randint(-heat, heat)
+        dev_red_factor = random.uniform(-variation_ratio, variation_ratio)
+        dev_green_factor = random.uniform(-variation_ratio, variation_ratio)
+        dev_blue_factor = random.uniform(-variation_ratio, variation_ratio)
 
         result = []
         for led_index, target_color in leds:
-            new_red = max(0, min(255, target_color[0] + dev_red))
-            new_green = max(0, min(255, target_color[1] + dev_green))
-            new_blue = max(0, min(255, target_color[2] + dev_blue))
+            new_red = max(0, min(255, int(round(target_color[0] * (1.0 + dev_red_factor)))))
+            new_green = max(0, min(255, int(round(target_color[1] * (1.0 + dev_green_factor)))))
+            new_blue = max(0, min(255, int(round(target_color[2] * (1.0 + dev_blue_factor)))))
             result.append((led_index, (new_red, new_green, new_blue)))
 
         return result
@@ -74,7 +100,8 @@ class FilterMixin:
             return leds
 
         frequency = filter_dict.get("frequency", 40)
-        heat = filter_dict.get("heat", 10)
+        variation_percent = self._variation_percent(filter_dict)
+        variation_ratio = variation_percent / 100.0
 
         interval = 40 // frequency
 
@@ -83,13 +110,13 @@ class FilterMixin:
 
         result = []
         for led_index, target_color in leds:
-            dev_red = random.randint(-heat, heat)
-            dev_green = random.randint(-heat, heat)
-            dev_blue = random.randint(-heat, heat)
+            dev_red_factor = random.uniform(-variation_ratio, variation_ratio)
+            dev_green_factor = random.uniform(-variation_ratio, variation_ratio)
+            dev_blue_factor = random.uniform(-variation_ratio, variation_ratio)
 
-            new_red = max(0, min(255, target_color[0] + dev_red))
-            new_green = max(0, min(255, target_color[1] + dev_green))
-            new_blue = max(0, min(255, target_color[2] + dev_blue))
+            new_red = max(0, min(255, int(round(target_color[0] * (1.0 + dev_red_factor)))))
+            new_green = max(0, min(255, int(round(target_color[1] * (1.0 + dev_green_factor)))))
+            new_blue = max(0, min(255, int(round(target_color[2] * (1.0 + dev_blue_factor)))))
             result.append((led_index, (new_red, new_green, new_blue)))
 
         return result
@@ -140,6 +167,7 @@ class FilterMixin:
         leds: list,
         tick_number: int,
         spike_color: tuple,
+        runtime_filter_key: str = "global",
     ) -> list:
         """Shared implementation for spike and dropout filters."""
 
@@ -156,6 +184,8 @@ class FilterMixin:
             filter_dict["_state"] = {}
 
         state = filter_dict["_state"]
+
+        runtime_state_key_prefix = str(runtime_filter_key) + "::"
 
         if scope == "all":
             groups = [leds]
@@ -182,15 +212,16 @@ class FilterMixin:
         result = []
 
         for group_index, group in enumerate(groups):
-            group_key = str(group_index)
+            group_key = runtime_state_key_prefix + str(group_index)
 
             if group_key not in state:
-                variation_offset = random.randint(-variation, variation) if variation > 0 else 0
                 initial_phase_offset = 0
                 if scope != "all" and period > 1:
                     initial_phase_offset = random.randint(0, period - 1)
                 state[group_key] = {
-                    "next_spike": tick_number + period + variation_offset + initial_phase_offset,
+                    # First trigger should be counted from effect start,
+                    # without variation jitter that can pull it to "now".
+                    "next_spike": tick_number + period + initial_phase_offset,
                     "spike_end": -1,
                 }
 
@@ -215,9 +246,25 @@ class FilterMixin:
 
         spike_color = self.get_color(filter_dict.get("color", "white"))
 
-        return self._apply_spike_filter(filter_dict, leds, tick_number, spike_color)
+        runtime_filter_key = filter_dict.get("_runtime_filter_key", "global")
+
+        return self._apply_spike_filter(
+            filter_dict,
+            leds,
+            tick_number,
+            spike_color,
+            runtime_filter_key=runtime_filter_key,
+        )
 
     def filter_dropout(self, filter_dict: dict, leds: list, tick_number: int) -> list:
         """Dropout filter: periodically overrides LED color with black."""
 
-        return self._apply_spike_filter(filter_dict, leds, tick_number, (0, 0, 0))
+        runtime_filter_key = filter_dict.get("_runtime_filter_key", "global")
+
+        return self._apply_spike_filter(
+            filter_dict,
+            leds,
+            tick_number,
+            (0, 0, 0),
+            runtime_filter_key=runtime_filter_key,
+        )

@@ -234,14 +234,24 @@ class EffectRuntimeMixin:
                             if hasattr(self, filter_name):
                                 filter_func = getattr(self, filter_name)
                                 transient_target_groups_set = False
+                                transient_runtime_filter_key_set = False
                                 if filter_dict.get("filter") in ("spike", "dropout"):
                                     filter_dict["_target_groups"] = self._target_component_groups(effect.get("target"))
                                     transient_target_groups_set = True
 
-                                filter_result = filter_func(filter_dict, filtered_colors, tick_number=tick_number)
+                                    # Scope runtime spike/dropout state to this
+                                    # effect instance so prior uses of the same
+                                    # named filter cannot leak timing state.
+                                    filter_dict["_runtime_filter_key"] = state_key + "@" + str(start_tick)
+                                    transient_runtime_filter_key_set = True
+
+                                filter_result = filter_func(filter_dict, filtered_colors, tick_number=local_tick)
 
                                 if transient_target_groups_set and "_target_groups" in filter_dict:
                                     del filter_dict["_target_groups"]
+
+                                if transient_runtime_filter_key_set and "_runtime_filter_key" in filter_dict:
+                                    del filter_dict["_runtime_filter_key"]
 
                                 if filter_result is not None:
                                     filtered_colors = filter_result
