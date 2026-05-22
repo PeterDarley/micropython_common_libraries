@@ -39,6 +39,8 @@ class YX5200Player:
         """
 
         self.uart_id: int = uart_id
+        self.tx_pin: int = tx_pin
+        self.rx_pin: int = rx_pin
         self.high_quality: bool = high_quality
         self.current_file: int | None = None
         self.is_playing: bool = False
@@ -47,28 +49,24 @@ class YX5200Player:
         try:
             self.uart: UART = UART(uart_id, baudrate=_BAUD_RATE, tx=tx_pin, rx=rx_pin, bits=8, stop=1)
         except (AttributeError, OSError, TypeError, ValueError) as err:
-            print(f"YX5200: UART {uart_id} init error: {err}")
+            print(f"YX5200: UART {uart_id} (tx={tx_pin}, rx={rx_pin}) init error: {err}")
             self.uart = None
 
-    def _calculate_checksum(self, data: bytes) -> int:
-        """Calculate DFPlayer checksum (two's complement of sum)."""
-
-        total: int = sum(data)
-        return (~total + 1) & 0xFFFF
-
     def _build_frame(self, cmd: int, param: int = 0) -> bytes:
-        """Build a DFPlayer protocol frame.
+        """Build a DFPlayer protocol frame (10 bytes).
 
-        Frame format: 0x7E VER CMD FB PARAM_H PARAM_L RES1 RES2 CHK_H CHK_L 0xEF
+        Frame format: 0x7E 0xFF 0x06 CMD ACK PARAM_H PARAM_L CHK_H CHK_L 0xEF
+        Checksum is the negated sum of bytes 1-6 (version through param_low).
         """
 
         version: int = 0xFF
+        length: int = 0x06
         feedback: int = 0x01
         param_high: int = (param >> 8) & 0xFF
         param_low: int = param & 0xFF
 
-        data: bytes = bytes([version, cmd, feedback, param_high, param_low, 0x00, 0x00])
-        checksum: int = self._calculate_checksum(data)
+        # Checksum covers bytes 1-6: version, length, cmd, feedback, param_h, param_l
+        checksum: int = -(version + length + cmd + feedback + param_high + param_low) & 0xFFFF
         checksum_high: int = (checksum >> 8) & 0xFF
         checksum_low: int = checksum & 0xFF
 
@@ -76,12 +74,11 @@ class YX5200Player:
             [
                 _FRAME_START,
                 version,
+                length,
                 cmd,
                 feedback,
                 param_high,
                 param_low,
-                0x00,
-                0x00,
                 checksum_high,
                 checksum_low,
                 _FRAME_END,
@@ -100,7 +97,10 @@ class YX5200Player:
         """
 
         if self.uart is None:
-            print(f"YX5200: UART {self.uart_id} send_command - uart not initialised")
+            print(
+                f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) "
+                "send_command - uart not initialised"
+            )
             return False
 
         try:
@@ -108,7 +108,9 @@ class YX5200Player:
             # Debug: show frame being written as hex
             try:
                 hex_frame = " ".join([f"{b:02X}" for b in frame])
-                print(f"YX5200: UART {self.uart_id} sending frame: {hex_frame}")
+                print(
+                    f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"sending frame: {hex_frame}"
+                )
             except (TypeError, ValueError):
                 pass
 
@@ -121,16 +123,26 @@ class YX5200Player:
                 if resp:
                     try:
                         hex_resp = " ".join([f"{b:02X}" for b in resp])
-                        print(f"YX5200: UART {self.uart_id} response: {hex_resp}")
+                        print(
+                            f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) "
+                            f"response: {hex_resp}"
+                        )
                     except (TypeError, ValueError):
-                        print(f"YX5200: UART {self.uart_id} response (raw):", resp)
+                        print(
+                            f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " "response (raw):",
+                            resp,
+                        )
+                else:
+                    print(f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " "no response received")
             except (AttributeError, OSError) as err:
                 # Non-fatal: some UART drivers may not support read() immediately
-                print(f"YX5200: UART {self.uart_id} response read error: {err}")
+                print(
+                    f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"response read error: {err}"
+                )
 
             return True
         except (AttributeError, OSError, TypeError, ValueError) as err:
-            print(f"YX5200: UART {self.uart_id} write error: {err}")
+            print(f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"write error: {err}")
             return False
 
     def play_file(self, file_number: int) -> bool:
@@ -143,7 +155,9 @@ class YX5200Player:
             True if command sent successfully
         """
 
-        print(f"YX5200: UART {self.uart_id} play_file request -> {file_number}")
+        print(
+            f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"play_file request -> {file_number}"
+        )
         success: bool = self.send_command(_CMD_PLAY_FILE, file_number)
         if success:
             self.current_file = file_number
@@ -237,6 +251,8 @@ class AudioPlayer:
                     {
                         "index": i,
                         "uart": getattr(p, "uart_id", None),
+                        "tx_pin": getattr(p, "tx_pin", None),
+                        "rx_pin": getattr(p, "rx_pin", None),
                         "hq": getattr(p, "high_quality", False),
                         "is_playing": getattr(p, "is_playing", False),
                         "current_file": getattr(p, "current_file", None),
@@ -270,6 +286,8 @@ class AudioPlayer:
         for i, player in enumerate(self.players):
             try:
                 uart_id = getattr(player, "uart_id", None)
+                tx_pin = getattr(player, "tx_pin", None)
+                rx_pin = getattr(player, "rx_pin", None)
                 # Use set_volume which issues a command and (via send_command)
                 # attempts to read a short response from the module.
                 ok = False
@@ -282,8 +300,16 @@ class AudioPlayer:
                 sleep(0.05)
 
                 state = player.get_state()
-                results[i] = {"ok": bool(ok), "state": state, "uart": uart_id}
-                print(f"AudioPlayer: health module {i} uart={uart_id} ok={ok} state={state}")
+                results[i] = {
+                    "ok": bool(ok),
+                    "state": state,
+                    "uart": uart_id,
+                    "tx_pin": tx_pin,
+                    "rx_pin": rx_pin,
+                }
+                print(
+                    f"AudioPlayer: health module {i} uart={uart_id} tx={tx_pin} rx={rx_pin} " f"ok={ok} state={state}"
+                )
             except (AttributeError, OSError, TypeError, ValueError) as err:
                 print(f"AudioPlayer: health check failed for module {i}: {err}")
                 results[i] = {"ok": False, "state": None, "uart": None}
