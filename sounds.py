@@ -52,7 +52,7 @@ class SoundManager:
         """Get all configured sounds.
 
         Returns:
-            Dict of {title: {file, duration_ms, high_quality}}
+            Dict of {title: {file, high_quality, ...}}
         """
 
         storage: PersistentDict = PersistentDict()
@@ -130,6 +130,9 @@ class SoundManager:
                 result[module_idx] = title
             else:
                 result[module_idx] = None
+
+        if getattr(self.audio_player, "debug_logging", False):
+            print(f"audio-debug: playing_state_raw={playing_state} file_to_title={file_to_title} mapped={result}")
 
         return result
 

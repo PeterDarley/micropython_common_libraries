@@ -971,6 +971,8 @@ class WebServer:
             err_no = e.args[0] if e.args else None
             if err_no == 116:  # ETIMEDOUT: idle keep-alive client stopped sending
                 self._log("websrv: client connection timed out")
+            elif err_no == 104:  # ECONNRESET: client closed connection mid-request
+                self._log("websrv: client reset connection")
             else:
                 print("websrv: 500 unhandled exception")
                 sys.print_exception(e)

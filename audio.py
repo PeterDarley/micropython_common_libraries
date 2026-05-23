@@ -46,9 +46,11 @@ class YX5200Player:
         self.tx_pin: int = tx_pin
         self.rx_pin: int = rx_pin
         self.high_quality: bool = high_quality
+        self.debug_logging: bool = False
         self.current_file: int | None = None
         self.is_playing: bool = False
         self.start_time: float = 0.0
+        self._pending_stop_confirmations: int = 0
 
         try:
             self.uart: UART = UART(uart_id, baudrate=_BAUD_RATE, tx=tx_pin, rx=rx_pin, bits=8, stop=1)
@@ -89,6 +91,12 @@ class YX5200Player:
             ]
         )
 
+    def _debug(self, message: str) -> None:
+        """Print audio debug logs when enabled for this player."""
+
+        if self.debug_logging:
+            print(f"audio-debug: uart={self.uart_id} tx={self.tx_pin} rx={self.rx_pin} {message}")
+
     def send_command(self, cmd: int, param: int = 0) -> bool:
         """Send a command to the player.
 
@@ -109,6 +117,7 @@ class YX5200Player:
 
         try:
             frame: bytes = self._build_frame(cmd, param)
+            self._debug(f"send cmd=0x{cmd:02X} param={param}")
             self.uart.write(frame)
 
             # Attempt a short response read to keep UART buffers tidy.
@@ -138,6 +147,7 @@ class YX5200Player:
             self.current_file = file_number
             self.is_playing = True
             self.start_time = time()
+            self._pending_stop_confirmations = 0
 
         return success
 
@@ -153,6 +163,7 @@ class YX5200Player:
         if success:
             self.is_playing = False
             self.current_file = None
+            self._pending_stop_confirmations = 0
 
         return success
 
@@ -182,6 +193,7 @@ class YX5200Player:
             sleep(0.7)
             self.is_playing = False
             self.current_file = None
+            self._pending_stop_confirmations = 0
 
         return success
 
@@ -199,6 +211,13 @@ class YX5200Player:
             return False
 
         try:
+            if self.current_file is not None or self.is_playing:
+                print(
+                    f"audio: status check begin uart={self.uart_id} "
+                    f"file={self.current_file} cached_playing={self.is_playing}"
+                )
+            self._debug(f"status check begin cached_playing={self.is_playing} current_file={self.current_file}")
+
             # Send status query command
             frame: bytes = self._build_frame(_CMD_QUERY_STATUS, 0)
             self.uart.write(frame)
@@ -208,18 +227,68 @@ class YX5200Player:
             resp = self.uart.read()
 
             if not resp or len(resp) < 10:
-                return False
+                # Keep previous state when status read is inconclusive.
+                if self.current_file is not None or self.is_playing:
+                    print(
+                        f"audio: status inconclusive uart={self.uart_id} "
+                        f"file={self.current_file} cached_playing={self.is_playing}"
+                    )
+                self._debug(f"status inconclusive resp={resp} keep_cached={self.is_playing}")
+                return bool(self.is_playing)
 
-            # Response format: 7E FF 06 42 XX ... EF
-            # The status byte is at index 5 (after 7E FF 06 42)
-            # Status: 0x00 = stopped, 0x01 = playing
-            status_byte = resp[5] if len(resp) > 5 else 0x00
-            is_playing = status_byte == _STATUS_PLAYING
+            # Response format is a 10-byte frame where indices 5 and 6 are
+            # status parameter bytes. Different module firmware variants place
+            # status codes in either byte, so parse both defensively.
+            status_high: int = resp[5] if len(resp) > 5 else 0x00
+            status_low: int = resp[6] if len(resp) > 6 else 0x00
+            status_param: int = ((status_high & 0xFF) << 8) | (status_low & 0xFF)
+            is_playing = (status_low == _STATUS_PLAYING) or (status_high == _STATUS_PLAYING)
+            try:
+                resp_hex = " ".join([f"{b:02X}" for b in resp])
+            except Exception:
+                resp_hex = str(resp)
+            self._debug(
+                f"status resp={resp_hex} status_high=0x{status_high:02X} "
+                f"status_low=0x{status_low:02X} status_param=0x{status_param:04X} "
+                f"parsed_playing={is_playing} cached_before={self.is_playing}"
+            )
+            if self.current_file is not None or self.is_playing or is_playing:
+                print(
+                    f"audio: status result uart={self.uart_id} "
+                    f"file={self.current_file} parsed_playing={is_playing} "
+                    f"status_high=0x{status_high:02X} status_low=0x{status_low:02X} "
+                    f"status_param=0x{status_param:04X}"
+                )
+
+            # Some modules briefly report a non-playing state right after play
+            # starts or while transitioning tracks. Require two consecutive
+            # stopped observations before clearing active playback state.
+            if not is_playing and self.is_playing:
+                self._pending_stop_confirmations += 1
+                print(
+                    f"audio: status stop pending uart={self.uart_id} " f"confirm={self._pending_stop_confirmations}/2"
+                )
+                if self._pending_stop_confirmations < 2:
+                    return True
+            else:
+                self._pending_stop_confirmations = 0
+
+            # Keep cached state in sync with hardware-reported status.
+            self.is_playing = is_playing
+            if not is_playing:
+                self.current_file = None
 
             return is_playing
 
-        except (AttributeError, OSError, TypeError, ValueError, IndexError):
-            return False
+        except (AttributeError, OSError, TypeError, ValueError, IndexError) as error:
+            # Treat UART errors as unknown and preserve cached state.
+            if self.current_file is not None or self.is_playing:
+                print(
+                    f"audio: status query error uart={self.uart_id} "
+                    f"file={self.current_file} cached_playing={self.is_playing} error={error}"
+                )
+            self._debug(f"status query error keep_cached={self.is_playing}")
+            return bool(self.is_playing)
 
     def get_state(self) -> tuple | None:
         """Get current playback state using actual hardware status.
@@ -229,7 +298,13 @@ class YX5200Player:
         """
 
         # Query actual hardware status instead of relying on is_playing flag
-        if self.query_status() and self.current_file is not None:
+        self._debug(f"get_state check begin cached_playing={self.is_playing} current_file={self.current_file}")
+        is_currently_playing: bool = self.query_status()
+        self._debug(
+            "get_state check result " f"queried_playing={is_currently_playing} current_file={self.current_file}"
+        )
+
+        if is_currently_playing and self.current_file is not None:
             return (self.current_file, self.high_quality)
 
         return None
@@ -276,10 +351,15 @@ class AudioPlayer:
             system_settings: dict = storage.get("system_settings", {})
             self.master_volume: int = system_settings.get("master_volume", 20)
             self.reset_on_boot: bool = bool(system_settings.get("audio_reset_on_boot", True))
+            self.debug_logging: bool = bool(system_settings.get("audio_debug_logging", False))
         except (AttributeError, OSError, TypeError, ValueError) as error:
             print(f"AudioPlayer: reading master volume failed: {error}")
             self.master_volume = 20
             self.reset_on_boot = True
+            self.debug_logging = False
+
+        for player in self.players:
+            player.debug_logging = self.debug_logging
 
         # Optional module reset at boot to recover players that miss power-on init.
         if self.reset_on_boot:
@@ -406,6 +486,9 @@ class AudioPlayer:
         state: dict = {}
         for i, player in enumerate(self.players):
             state[i] = player.get_state()
+
+        if getattr(self, "debug_logging", False):
+            print(f"audio-debug: get_playing_state={state}")
 
         return state
 
