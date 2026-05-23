@@ -1212,6 +1212,7 @@ class WebServer:
             return
 
         server_address = socket.getaddrinfo(self.host, self.port)[0][-1]
+        server_socket = None
         # Retry socket creation — after a soft reset lingering FDs may briefly
         # exhaust the table before lwIP releases them.
         for creation_attempt in range(10):
@@ -1225,7 +1226,11 @@ class WebServer:
                     gc.collect()
                     time.sleep_ms(200)
                 else:
-                    raise
+                    self._log("websrv: socket create failed", creation_error)
+                    return
+        if server_socket is None:
+            self._log("websrv: socket create failed after retries (ENFILE)")
+            return
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # Retry bind — after a soft reset the old socket may linger briefly.
         for attempt in range(5):

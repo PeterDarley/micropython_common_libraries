@@ -13,6 +13,7 @@ _BAUD_RATE: int = 9600
 _FRAME_START: int = 0x7E
 _FRAME_END: int = 0xEF
 _CMD_SET_VOLUME: int = 0x06
+_CMD_RESET: int = 0x0C
 _CMD_PLAY_FILE: int = 0x12
 _CMD_PAUSE: int = 0x0E
 _CMD_STOP: int = 0x16
@@ -108,40 +109,14 @@ class YX5200Player:
 
         try:
             frame: bytes = self._build_frame(cmd, param)
-            # Debug: show frame being written as hex
-            try:
-                hex_frame = " ".join([f"{b:02X}" for b in frame])
-                print(
-                    f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"sending frame: {hex_frame}"
-                )
-            except (TypeError, ValueError):
-                pass
-
             self.uart.write(frame)
 
-            # If feedback requested, try to read a response from the module
+            # Attempt a short response read to keep UART buffers tidy.
             try:
                 sleep(0.05)
-                resp = self.uart.read()
-                if resp:
-                    try:
-                        hex_resp = " ".join([f"{b:02X}" for b in resp])
-                        print(
-                            f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) "
-                            f"response: {hex_resp}"
-                        )
-                    except (TypeError, ValueError):
-                        print(
-                            f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " "response (raw):",
-                            resp,
-                        )
-                else:
-                    print(f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " "no response received")
-            except (AttributeError, OSError) as err:
-                # Non-fatal: some UART drivers may not support read() immediately
-                print(
-                    f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"response read error: {err}"
-                )
+                self.uart.read()
+            except (AttributeError, OSError):
+                pass
 
             return True
         except (AttributeError, OSError, TypeError, ValueError) as err:
@@ -158,9 +133,6 @@ class YX5200Player:
             True if command sent successfully
         """
 
-        print(
-            f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"play_file request -> {file_number}"
-        )
         success: bool = self.send_command(_CMD_PLAY_FILE, file_number)
         if success:
             self.current_file = file_number
@@ -197,6 +169,22 @@ class YX5200Player:
         clamped: int = max(0, min(30, volume))
         return self.send_command(_CMD_SET_VOLUME, clamped)
 
+    def reset_module(self) -> bool:
+        """Issue a UART soft reset to the YX5200 module.
+
+        Returns:
+            True if reset command sent successfully.
+        """
+
+        success: bool = self.send_command(_CMD_RESET, 0)
+        if success:
+            # Module firmware needs a short settle period after reset.
+            sleep(0.7)
+            self.is_playing = False
+            self.current_file = None
+
+        return success
+
     def query_status(self) -> bool:
         """Query whether the player is currently playing.
 
@@ -220,10 +208,6 @@ class YX5200Player:
             resp = self.uart.read()
 
             if not resp or len(resp) < 10:
-                print(
-                    f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) "
-                    f"status query: no/incomplete response"
-                )
                 return False
 
             # Response format: 7E FF 06 42 XX ... EF
@@ -232,15 +216,9 @@ class YX5200Player:
             status_byte = resp[5] if len(resp) > 5 else 0x00
             is_playing = status_byte == _STATUS_PLAYING
 
-            print(
-                f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) "
-                f"status query: playing={is_playing} (byte={status_byte:02X})"
-            )
-
             return is_playing
 
-        except (AttributeError, OSError, TypeError, ValueError, IndexError) as err:
-            print(f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"status query failed: {err}")
+        except (AttributeError, OSError, TypeError, ValueError, IndexError):
             return False
 
     def get_state(self) -> tuple | None:
@@ -293,33 +271,24 @@ class AudioPlayer:
                 player: YX5200Player = YX5200Player(uart_id, tx_pin, rx_pin, high_quality)
                 self.players.append(player)
 
-        if not self.players:
-            print("AudioPlayer: no modules configured")
-        else:
-            try:
-                infos = [
-                    {
-                        "index": i,
-                        "uart": getattr(p, "uart_id", None),
-                        "tx_pin": getattr(p, "tx_pin", None),
-                        "rx_pin": getattr(p, "rx_pin", None),
-                        "hq": getattr(p, "high_quality", False),
-                        "is_playing": getattr(p, "is_playing", False),
-                        "current_file": getattr(p, "current_file", None),
-                    }
-                    for i, p in enumerate(self.players)
-                ]
-                print("AudioPlayer: configured modules:", infos)
-            except (AttributeError, TypeError) as error:
-                print(f"AudioPlayer: module info collection failed: {error}")
-
         # Load master volume from persistent settings
         try:
             system_settings: dict = storage.get("system_settings", {})
             self.master_volume: int = system_settings.get("master_volume", 20)
+            self.reset_on_boot: bool = bool(system_settings.get("audio_reset_on_boot", True))
         except (AttributeError, OSError, TypeError, ValueError) as error:
             print(f"AudioPlayer: reading master volume failed: {error}")
             self.master_volume = 20
+            self.reset_on_boot = True
+
+        # Optional module reset at boot to recover players that miss power-on init.
+        if self.reset_on_boot:
+            for i, player in enumerate(self.players):
+                try:
+                    reset_ok = player.reset_module()
+                    print(f"AudioPlayer: boot reset module {i} ok={reset_ok}")
+                except (AttributeError, OSError, TypeError, ValueError) as error:
+                    print(f"AudioPlayer: boot reset failed for module {i}: {error}")
 
         # Perform a quick health check on configured modules at init/boot
         try:
@@ -421,9 +390,8 @@ class AudioPlayer:
         # Ensure volume is set correctly before playing
         try:
             self.set_volume(module_idx, self.master_volume)
-            print(f"AudioPlayer: set volume={self.master_volume} on module {module_idx}")
-        except (AttributeError, OSError, TypeError, ValueError) as error:
-            print(f"AudioPlayer: failed to set volume on module {module_idx}: {error}")
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
 
         self.players[module_idx].play_file(file_number)
         return module_idx

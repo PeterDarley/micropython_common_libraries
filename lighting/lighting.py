@@ -280,6 +280,22 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
                 if isinstance(scene_entry, dict):
                     _clear_filter_list_runtime(scene_entry.get("filters"))
 
+    def _play_scene_sound(self, scene_name: str) -> None:
+        """Play the configured trigger sound for a scene, if one is set."""
+
+        scene_meta: dict = self.settings.get("scene_settings", {}).get(scene_name, {})
+        sound_name: str = scene_meta.get("sound", "").strip()
+        if not sound_name:
+            return
+
+        try:
+            from sounds import SoundManager
+
+            manager: SoundManager = SoundManager()
+            manager.play_sound(sound_name)
+        except Exception as error:
+            print(f"lighting: failed to play scene sound scene={scene_name} sound={sound_name}: {error}")
+
     def set_scene(self, scene_name: str = None, **kwargs) -> None:
         """Replace all active scenes with a single scene and reset state."""
 
@@ -331,6 +347,9 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
         if resolved in self._scene_functions:
             self._scene_functions[resolved](lighting=self, **kwargs)
 
+        if scene_name is not None:
+            self._play_scene_sound(resolved)
+
     def add_scene(self, scene_name: str) -> None:
         """Add a scene to the active set without disturbing currently running scenes."""
 
@@ -351,6 +370,8 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
 
         if scene_name in self._scene_functions:
             self._scene_functions[scene_name](lighting=self)
+
+        self._play_scene_sound(scene_name)
 
     def remove_scene(self, scene_name: str) -> None:
         """Remove a scene from the active set and clean up its state."""
