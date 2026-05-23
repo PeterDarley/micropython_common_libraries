@@ -16,7 +16,10 @@ _CMD_SET_VOLUME: int = 0x06
 _CMD_PLAY_FILE: int = 0x12
 _CMD_PAUSE: int = 0x0E
 _CMD_STOP: int = 0x16
+_CMD_QUERY_STATUS: int = 0x42
 _STATUS_TRACK_FINISHED: int = 0x3D
+_STATUS_PLAYING: int = 0x01
+_STATUS_STOPPED: int = 0x00
 
 
 class NoPlayersAvailable(Exception):
@@ -194,14 +197,61 @@ class YX5200Player:
         clamped: int = max(0, min(30, volume))
         return self.send_command(_CMD_SET_VOLUME, clamped)
 
+    def query_status(self) -> bool:
+        """Query whether the player is currently playing.
+
+        Sends a status query command and reads the response to determine
+        actual playback state instead of relying on the is_playing flag.
+
+        Returns:
+            True if the module reports it is currently playing, False otherwise
+        """
+
+        if self.uart is None:
+            return False
+
+        try:
+            # Send status query command
+            frame: bytes = self._build_frame(_CMD_QUERY_STATUS, 0)
+            self.uart.write(frame)
+
+            # Wait for and read response
+            sleep(0.05)
+            resp = self.uart.read()
+
+            if not resp or len(resp) < 10:
+                print(
+                    f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) "
+                    f"status query: no/incomplete response"
+                )
+                return False
+
+            # Response format: 7E FF 06 42 XX ... EF
+            # The status byte is at index 5 (after 7E FF 06 42)
+            # Status: 0x00 = stopped, 0x01 = playing
+            status_byte = resp[5] if len(resp) > 5 else 0x00
+            is_playing = status_byte == _STATUS_PLAYING
+
+            print(
+                f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) "
+                f"status query: playing={is_playing} (byte={status_byte:02X})"
+            )
+
+            return is_playing
+
+        except (AttributeError, OSError, TypeError, ValueError, IndexError) as err:
+            print(f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"status query failed: {err}")
+            return False
+
     def get_state(self) -> tuple | None:
-        """Get current playback state.
+        """Get current playback state using actual hardware status.
 
         Returns:
             (file_number, high_quality) tuple if playing, None if idle
         """
 
-        if self.is_playing and self.current_file is not None:
+        # Query actual hardware status instead of relying on is_playing flag
+        if self.query_status() and self.current_file is not None:
             return (self.current_file, self.high_quality)
 
         return None
@@ -263,12 +313,28 @@ class AudioPlayer:
             except (AttributeError, TypeError) as error:
                 print(f"AudioPlayer: module info collection failed: {error}")
 
+        # Load master volume from persistent settings
+        try:
+            system_settings: dict = storage.get("system_settings", {})
+            self.master_volume: int = system_settings.get("master_volume", 20)
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            print(f"AudioPlayer: reading master volume failed: {error}")
+            self.master_volume = 20
+
         # Perform a quick health check on configured modules at init/boot
         try:
             self.check_health()
         except (AttributeError, OSError, TypeError, ValueError) as error:
             # Non-fatal: ensure init continues even if health checks fail
             print(f"AudioPlayer: initial health check failed: {error}")
+
+        # Apply master volume to all players after health check
+        try:
+            for player in self.players:
+                player.set_volume(self.master_volume)
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            # Non-fatal: ensure init continues even if volume setting fails
+            print(f"AudioPlayer: setting master volume failed: {error}")
 
     def check_health(self) -> dict:
         """Check basic responsiveness of all configured players.
@@ -292,7 +358,7 @@ class AudioPlayer:
                 # attempts to read a short response from the module.
                 ok = False
                 try:
-                    ok = player.set_volume(30)
+                    ok = player.set_volume(getattr(self, "master_volume", 20))
                 except (AttributeError, OSError, TypeError, ValueError):
                     ok = False
 
@@ -340,7 +406,8 @@ class AudioPlayer:
         if not self.players:
             raise NoPlayersAvailable("No audio modules configured")
 
-        candidates: list = [i for i, p in enumerate(self.players) if not p.is_playing]
+        # Check actual hardware status instead of just is_playing flag
+        candidates: list = [i for i, p in enumerate(self.players) if not p.query_status()]  # Use actual status query
 
         if not candidates:
             raise NoPlayersAvailable(f"All {len(self.players)} modules busy")
@@ -351,10 +418,10 @@ class AudioPlayer:
         else:
             module_idx = candidates[0]
 
-        # Ensure playback is audible: set module to max volume before playing
+        # Ensure volume is set correctly before playing
         try:
-            self.set_volume(module_idx, 30)
-            print(f"AudioPlayer: set volume=30 on module {module_idx}")
+            self.set_volume(module_idx, self.master_volume)
+            print(f"AudioPlayer: set volume={self.master_volume} on module {module_idx}")
         except (AttributeError, OSError, TypeError, ValueError) as error:
             print(f"AudioPlayer: failed to set volume on module {module_idx}: {error}")
 
