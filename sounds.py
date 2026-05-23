@@ -27,11 +27,7 @@ class SoundManager:
 
         self._initialised: bool = True
         self.audio_player: AudioPlayer = AudioPlayer()
-        # Perform an initial health check and keep the results available
-        try:
-            self._last_health: dict = self.audio_player.check_health()
-        except Exception:
-            self._last_health = {}
+        self._last_health: dict = {}
 
     def get_last_health(self) -> dict:
         """Return the most recent health-check results."""

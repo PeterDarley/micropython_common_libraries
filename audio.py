@@ -18,9 +18,7 @@ _CMD_PLAY_FILE: int = 0x12
 _CMD_PAUSE: int = 0x0E
 _CMD_STOP: int = 0x16
 _CMD_QUERY_STATUS: int = 0x42
-_STATUS_TRACK_FINISHED: int = 0x3D
 _STATUS_PLAYING: int = 0x01
-_STATUS_STOPPED: int = 0x00
 
 
 class NoPlayersAvailable(Exception):
@@ -197,6 +195,35 @@ class YX5200Player:
 
         return success
 
+    def _find_response_frame(self, data: bytes, expected_cmd: int) -> tuple | None:
+        """Search raw UART bytes for a valid 10-byte DFPlayer response frame.
+
+        A valid response frame is: 7E FF 06 <cmd> 00 <param_h> <param_l> <chk_h> <chk_l> EF
+        The feedback byte (index 4) is 0x00 in responses (vs 0x01 in sent commands).
+
+        Returns:
+            (param_high, param_low) tuple if a valid frame is found, None otherwise.
+        """
+
+        for i in range(len(data) - 9):
+            if data[i] != _FRAME_START:
+                continue
+            if data[i + 9] != _FRAME_END:
+                continue
+            # Check version and length bytes
+            if data[i + 1] != 0xFF or data[i + 2] != 0x06:
+                continue
+            # Check command byte matches expected response
+            if data[i + 3] != expected_cmd:
+                continue
+            # Response frames have feedback=0x00; sent frames have 0x01.
+            # Accept 0x00 to distinguish from echoed commands.
+            if data[i + 4] != 0x00:
+                continue
+            return (data[i + 5], data[i + 6])
+
+        return None
+
     def query_status(self) -> bool:
         """Query whether the player is currently playing.
 
@@ -218,12 +245,18 @@ class YX5200Player:
                 )
             self._debug(f"status check begin cached_playing={self.is_playing} current_file={self.current_file}")
 
+            # Drain any stale bytes in the RX buffer before sending query.
+            try:
+                self.uart.read()
+            except (AttributeError, OSError):
+                pass
+
             # Send status query command
             frame: bytes = self._build_frame(_CMD_QUERY_STATUS, 0)
             self.uart.write(frame)
 
-            # Wait for and read response
-            sleep(0.05)
+            # Wait for response — 100ms gives the module time to reply.
+            sleep(0.1)
             resp = self.uart.read()
 
             if not resp or len(resp) < 10:
@@ -236,13 +269,28 @@ class YX5200Player:
                 self._debug(f"status inconclusive resp={resp} keep_cached={self.is_playing}")
                 return bool(self.is_playing)
 
-            # Response format is a 10-byte frame where indices 5 and 6 are
-            # status parameter bytes. Different module firmware variants place
-            # status codes in either byte, so parse both defensively.
-            status_high: int = resp[5] if len(resp) > 5 else 0x00
-            status_low: int = resp[6] if len(resp) > 6 else 0x00
+            # Search for a valid response frame in the buffer. The buffer may
+            # contain the echoed command frame followed by the actual response.
+            parsed = self._find_response_frame(resp, _CMD_QUERY_STATUS)
+
+            if parsed is None:
+                # No valid response frame found — treat as inconclusive.
+                try:
+                    resp_hex = " ".join([f"{b:02X}" for b in resp])
+                except Exception:
+                    resp_hex = str(resp)
+                if self.current_file is not None or self.is_playing:
+                    print(
+                        f"audio: status no valid frame uart={self.uart_id} "
+                        f"file={self.current_file} resp={resp_hex}"
+                    )
+                self._debug(f"status no valid frame resp={resp_hex} keep_cached={self.is_playing}")
+                return bool(self.is_playing)
+
+            status_high, status_low = parsed
             status_param: int = ((status_high & 0xFF) << 8) | (status_low & 0xFF)
             is_playing = (status_low == _STATUS_PLAYING) or (status_high == _STATUS_PLAYING)
+
             try:
                 resp_hex = " ".join([f"{b:02X}" for b in resp])
             except Exception:
@@ -376,14 +424,6 @@ class AudioPlayer:
         except (AttributeError, OSError, TypeError, ValueError) as error:
             # Non-fatal: ensure init continues even if health checks fail
             print(f"AudioPlayer: initial health check failed: {error}")
-
-        # Apply master volume to all players after health check
-        try:
-            for player in self.players:
-                player.set_volume(self.master_volume)
-        except (AttributeError, OSError, TypeError, ValueError) as error:
-            # Non-fatal: ensure init continues even if volume setting fails
-            print(f"AudioPlayer: setting master volume failed: {error}")
 
     def check_health(self) -> dict:
         """Check basic responsiveness of all configured players.
