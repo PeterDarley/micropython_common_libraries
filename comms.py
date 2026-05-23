@@ -9,9 +9,6 @@ from network import WLAN, STA_IF  # type: ignore
 from time import time_ns, time, sleep
 from struct import unpack  # type: ignore
 
-# mf = __import__("micropython-fusion")
-
-# from constants import qmc5883l
 from timing import TimerManager
 from utils import bytes_to_int
 

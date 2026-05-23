@@ -175,39 +175,7 @@ def _resolve_variable(expression: str, context: dict) -> str:
     Returns an empty string if the variable or any part of the path is not found.
     """
 
-    expression = expression.strip()
-
-    # Return quoted string literals as plain strings
-    if len(expression) >= 2:
-        if (expression[0] == '"' and expression[-1] == '"') or (expression[0] == "'" and expression[-1] == "'"):
-            return expression[1:-1]
-
-    parts = expression.split(".")
-    value = context.get(parts[0])
-
-    for part in parts[1:]:
-        if value is None:
-            return ""
-
-        if isinstance(value, dict):
-            value = value.get(part)
-        elif isinstance(value, (list, tuple)):
-            try:
-                value = value[int(part)]
-            except ValueError:
-                # Part is not a literal integer; try resolving it as a context variable
-                if part in context:
-                    try:
-                        value = value[int(context[part])]
-                    except (ValueError, TypeError, IndexError):
-                        return ""
-                else:
-                    return ""
-            except IndexError:
-                return ""
-        else:
-            return ""
-
+    value = _resolve_variable_raw(expression, context)
     return "" if value is None else str(value)
 
 

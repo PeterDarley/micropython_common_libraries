@@ -1,6 +1,6 @@
 """Holds classes/functions for timing"""
 
-from micropython import schedule, const  # type: ignore
+from micropython import schedule  # type: ignore
 from machine import Timer  # type: ignore
 from math import inf
 
@@ -13,41 +13,40 @@ class TimerManager:
     def __new__(cls, *args, **kwargs):
         """Create a singleton."""
 
-        if not hasattr(cls, "instance"):
-            cls.instance: TimerManager = super(TimerManager, cls).__new__(cls)
+        if not hasattr(cls, "_instance"):
+            cls._instance = super().__new__(cls)
 
-        return cls.instance
+        return cls._instance
 
     def __init__(self):
         """Initialize the timer factory."""
 
-        if not hasattr(self, "timers"):
-            self.timers: list = [None for timer in range(self.timer_count)]
+        if getattr(self, "_initialised", False):
+            return
+
+        self._initialised: bool = True
+        self._timer_count: int = 4
+        self.timers: list = [None for _ in range(self._timer_count)]
 
     @property
     def timer_count(self):
         """Return the number of timers available."""
 
-        timer_counts: dict = {"ESP32": const(4)}
-
-        if settings.BOARD["Type"] in timer_counts:
-            return timer_counts[settings.BOARD["Type"]]
-        else:
-            # Guess at number of timers.  Choosing 4 out of ignorance.
-            return 4
+        return self._timer_count
 
     def first_available_timer(self) -> int:
         """Return the first available timer."""
 
-        if len(self) < self.timer_count:
-            return min([timer for timer in range(self.timer_count) if self.timers[timer] is None])
+        for i in range(self._timer_count):
+            if self.timers[i] is None:
+                return i
 
         return None
 
     def __len__(self) -> int:
         """Return the number of timers in use."""
-        # return len(self.timers)
-        return len([timer for timer in range(self.timer_count) if self.timers[timer] is not None])
+
+        return sum(1 for t in self.timers if t is not None)
 
     class Timey:
         """Timer class."""

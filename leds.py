@@ -355,8 +355,8 @@ class LEDs:
             color = self._apply_brightness_curve_to_rgb(r, g, b)
 
         if brightness >= 0.999:
-            return tuple(int(min(255, max(0, c))) for c in color)
-        return tuple(int(min(255, max(0, int(c * brightness)))) for c in color)
+            return color
+        return tuple(int(c * brightness) for c in color)
 
     def set(self, target: int | list | str, color: tuple) -> None:
         """Set pixels `target` to `color` (r,g,b). Does not write to strip until `show()` is called.
@@ -365,6 +365,10 @@ class LEDs:
             target: int index, list of indices, "0-14" range string, or "all"
             color: RGB tuple (r, g, b)
         """
+        if target == "all":
+            self.fill(color)
+            return
+
         scaled = self._scale(color)
         indexes = self._get_indexes(target)
 
@@ -396,8 +400,7 @@ class LEDs:
         scaled = self._scale(color)
         for strip_idx, strip in enumerate(self._strips):
             reordered = self._reorder(scaled, self._strip_orders[strip_idx])
-            for i in range(len(strip)):
-                strip[i] = reordered
+            strip.fill(reordered)
 
     def range(self, start: int, end: int, color: tuple) -> None:
         """Set pixels from `start` to `end` (exclusive) to `color` (r,g,b)."""

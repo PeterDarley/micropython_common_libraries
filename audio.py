@@ -469,12 +469,8 @@ class AudioPlayer:
                 print(f"AudioPlayer: health check failed for module {i}: {err}")
                 results[i] = {"ok": False, "state": None, "uart": None}
 
-        # summary
-        try:
-            healthy = sum(1 for v in results.values() if v.get("ok"))
-            print(f"AudioPlayer: health check summary {healthy}/{len(self.players)} modules responsive")
-        except (AttributeError, TypeError, ValueError) as error:
-            print(f"AudioPlayer: health summary failed: {error}")
+        healthy = sum(1 for v in results.values() if v.get("ok"))
+        print(f"AudioPlayer: health check summary {healthy}/{len(self.players)} modules responsive")
 
         return results
 
@@ -495,8 +491,14 @@ class AudioPlayer:
         if not self.players:
             raise NoPlayersAvailable("No audio modules configured")
 
-        # Check actual hardware status instead of just is_playing flag
-        candidates: list = [i for i, p in enumerate(self.players) if not p.query_status()]  # Use actual status query
+        # Use cached is_playing as fast path; only query hardware for modules
+        # that think they are playing (to confirm they haven't stopped).
+        candidates: list = []
+        for i, player in enumerate(self.players):
+            if not player.is_playing:
+                candidates.append(i)
+            elif not player.query_status():
+                candidates.append(i)
 
         if not candidates:
             raise NoPlayersAvailable(f"All {len(self.players)} modules busy")

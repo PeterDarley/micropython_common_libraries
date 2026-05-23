@@ -153,6 +153,3 @@ class PersistentDict:
 
         self._ensure_loaded()
         return iter(self._data)
-
-
-storage = PersistentDict("storage.json")
