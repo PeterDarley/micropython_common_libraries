@@ -7,6 +7,7 @@ with MP3 files in the /MP3/ folder numbered 0001.mp3, 0002.mp3, etc.
 from machine import UART  # type: ignore
 from time import sleep, time
 from storage import PersistentDict
+from timing import TimerManager
 
 # DFPlayer protocol constants
 _BAUD_RATE: int = 9600
@@ -49,6 +50,7 @@ class YX5200Player:
         self.is_playing: bool = False
         self.start_time: float = 0.0
         self._pending_stop_confirmations: int = 0
+        self.last_polled: float = 0.0
 
         try:
             self.uart: UART = UART(uart_id, baudrate=_BAUD_RATE, tx=tx_pin, rx=rx_pin, bits=8, stop=1)
@@ -146,6 +148,7 @@ class YX5200Player:
             self.is_playing = True
             self.start_time = time()
             self._pending_stop_confirmations = 0
+            self.last_polled = time()
 
         return success
 
@@ -425,6 +428,11 @@ class AudioPlayer:
             # Non-fatal: ensure init continues even if health checks fail
             print(f"AudioPlayer: initial health check failed: {error}")
 
+        # Initialize continuous polling state
+        self._active_players: list = []
+        self._current_poll_index: int = 0
+        self._polling_timer_id: int | None = None
+
     def check_health(self) -> dict:
         """Check basic responsiveness of all configured players.
 
@@ -519,7 +527,10 @@ class AudioPlayer:
         return module_idx
 
     def get_playing_state(self) -> dict:
-        """Get state of all modules.
+        """Get current playback state (cached, not queried).
+
+        Returns the current state based on continuous background polling.
+        Does NOT perform UART queries (use query_status() if you need fresh data).
 
         Returns:
             Dict mapping module index to (file_num, hq) tuple or None
@@ -527,7 +538,10 @@ class AudioPlayer:
 
         state: dict = {}
         for i, player in enumerate(self.players):
-            state[i] = player.get_state()
+            if player.is_playing and player.current_file is not None:
+                state[i] = (player.current_file, player.high_quality)
+            else:
+                state[i] = None
 
         if getattr(self, "debug_logging", False):
             print(f"audio-debug: get_playing_state={state}")
@@ -555,3 +569,55 @@ class AudioPlayer:
 
         for player in self.players:
             player.stop()
+
+    def start_continuous_polling(self) -> None:
+        """Start background polling of active players every 100ms.
+
+        Maintains _active_players list of indices currently playing. Only polls
+        players that are actively playing; when a player stops, it's automatically
+        removed from the active list. Queries are staggered so only one player
+        is polled per 100ms tick.
+        """
+
+        if self._polling_timer_id is not None:
+            return
+
+        try:
+            timer_mgr: TimerManager = TimerManager()
+            self._polling_timer_id = timer_mgr.allocate_periodic_timer(100, self._poll_tick)
+            print("AudioPlayer: continuous polling started (100ms interval)")
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            print(f"AudioPlayer: failed to start continuous polling: {error}")
+
+    def _poll_tick(self) -> None:
+        """Poll one active player per 100ms tick, staggered across all active players.
+
+        This method is called by the background timer every 100ms. It maintains
+        the active_players list and queries exactly one player per tick to avoid
+        blocking. When a player reports stopped, it's removed from active list.
+        """
+
+        try:
+            # Rebuild active_players list: only include players currently playing
+            self._active_players = [i for i in range(len(self.players)) if self.players[i].is_playing]
+
+            if not self._active_players:
+                return
+
+            # Stagger queries: poll one active player per tick
+            if self._current_poll_index >= len(self._active_players):
+                self._current_poll_index = 0
+
+            player_idx: int = self._active_players[self._current_poll_index]
+            self.players[player_idx].query_status()
+            self._current_poll_index += 1
+
+            # Check for sounds that ended and handle loop/chain logic
+            try:
+                from sounds import SoundManager
+                SoundManager().check_for_ended_sounds()
+            except (AttributeError, ImportError, OSError):
+                pass
+
+        except (AttributeError, OSError, TypeError, ValueError, IndexError) as error:
+            print(f"AudioPlayer: polling tick error: {error}")

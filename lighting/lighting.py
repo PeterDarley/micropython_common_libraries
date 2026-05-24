@@ -296,6 +296,40 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
         except Exception as error:
             print(f"lighting: failed to play scene sound scene={scene_name} sound={sound_name}: {error}")
 
+    def _stop_scene_sounds(self, scene_name: str, setting_key: str) -> None:
+        """Stop configured sounds for a scene lifecycle event.
+
+        Args:
+            scene_name: Scene name whose metadata should be read.
+            setting_key: Scene-settings key containing sound titles to stop.
+        """
+
+        scene_meta: dict = self.settings.get("scene_settings", {}).get(scene_name, {})
+        sound_titles: list = scene_meta.get(setting_key, [])
+        if not isinstance(sound_titles, list) or not sound_titles:
+            return
+
+        normalized_titles: list[str] = []
+        for title in sound_titles:
+            if isinstance(title, str):
+                stripped_title: str = title.strip()
+                if stripped_title:
+                    normalized_titles.append(stripped_title)
+
+        if not normalized_titles:
+            return
+
+        try:
+            from sounds import SoundManager
+
+            manager: SoundManager = SoundManager()
+            manager.stop_sounds_by_title(normalized_titles)
+        except Exception as error:
+            print(
+                "lighting: failed to stop scene sounds "
+                f"scene={scene_name} setting={setting_key} titles={normalized_titles}: {error}"
+            )
+
     def set_scene(self, scene_name: str = None, **kwargs) -> None:
         """Replace all active scenes with a single scene and reset state."""
 
@@ -329,6 +363,9 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
             for active_scene_name in list(self._active_scenes):
                 self._log_scene_effect_endings(active_scene_name, reason="scene-replaced", tick_number=tick_number)
 
+        for active_scene_name in list(self._active_scenes):
+            self._stop_scene_sounds(active_scene_name, "stop_sounds_on_end")
+
         self._clear_runtime_filter_state()
 
         self._active_scenes = [resolved]
@@ -347,8 +384,8 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
         if resolved in self._scene_functions:
             self._scene_functions[resolved](lighting=self, **kwargs)
 
-        if scene_name is not None:
-            self._play_scene_sound(resolved)
+        self._stop_scene_sounds(resolved, "stop_sounds_on_start")
+        self._play_scene_sound(resolved)
 
     def add_scene(self, scene_name: str) -> None:
         """Add a scene to the active set without disturbing currently running scenes."""
@@ -363,6 +400,8 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
         scene_meta: dict = self.settings.get("scene_settings", {}).get(scene_name, {})
         for kill_name in scene_meta.get("kills", []):
             self.remove_scene(kill_name)
+
+        self._stop_scene_sounds(scene_name, "stop_sounds_on_start")
 
         self._active_scenes.append(scene_name)
         current_tick = self.animation.tick_number if hasattr(self, "animation") else 0
@@ -382,6 +421,8 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
         if hasattr(self, "_log_scene_effect_endings"):
             tick_number = self.animation.tick_number if hasattr(self, "animation") else -1
             self._log_scene_effect_endings(scene_name, reason="scene-removed", tick_number=tick_number)
+
+        self._stop_scene_sounds(scene_name, "stop_sounds_on_end")
 
         self._active_scenes.remove(scene_name)
         self._scene_start_ticks.pop(scene_name, None)

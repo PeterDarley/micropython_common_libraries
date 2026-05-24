@@ -28,6 +28,8 @@ class SoundManager:
         self._initialised: bool = True
         self.audio_player: AudioPlayer = AudioPlayer()
         self._last_health: dict = {}
+        self._module_sound_map: dict = {}  # Maps module_idx to (title, loop_count_remaining)
+        self._previous_playing_state: dict = {}
 
     def get_last_health(self) -> dict:
         """Return the most recent health-check results."""
@@ -99,11 +101,57 @@ class SoundManager:
         file_number: int = int(sound.get("file", 0))
         high_quality: bool = bool(sound.get("high_quality", False))
 
+        # Stop any sounds in the "stops" list before starting
+        stops_list: list = sound.get("stops", [])
+        if stops_list:
+            self._stop_sounds_by_title(stops_list)
+
         module_idx: int = self.audio_player.play_file(file_number, high_quality_preferred=high_quality)
 
-        print(f"sound: start title='{title}' file={file_number} module={module_idx} hq={high_quality}")
+        loop_count: int = int(sound.get("loop_count", 0))
+        print(f"sound: start title='{title}' file={file_number} module={module_idx} hq={high_quality} loop_count={loop_count}")
 
+        # Track which sound is playing on this module, along with remaining loop count
+        self._module_sound_map[module_idx] = (title, loop_count)
         return module_idx
+
+    def _stop_sounds_by_title(self, titles: list) -> None:
+        """Stop playback of sounds by title.
+
+        Args:
+            titles: List of sound titles to stop
+        """
+
+        playing: dict = self.get_playing_sounds()
+        for module_idx, playing_title in playing.items():
+            if playing_title in titles:
+                try:
+                    self.audio_player.players[module_idx].stop()
+                    print(f"sound: stopped title='{playing_title}' module={module_idx}")
+                except (AttributeError, IndexError, OSError):
+                    pass
+
+    def stop_sounds_by_title(self, titles: list[str]) -> None:
+        """Stop playback for all currently playing sounds whose titles match.
+
+        Args:
+            titles: Sound titles to stop.
+        """
+
+        if not titles:
+            return
+
+        normalized_titles: list[str] = []
+        for title in titles:
+            if isinstance(title, str):
+                stripped_title: str = title.strip()
+                if stripped_title:
+                    normalized_titles.append(stripped_title)
+
+        if not normalized_titles:
+            return
+
+        self._stop_sounds_by_title(normalized_titles)
 
     def get_playing_sounds(self) -> dict:
         """Get currently playing sounds.
@@ -136,6 +184,7 @@ class SoundManager:
         """Stop playback on all modules."""
 
         self.audio_player.stop_all()
+        self._module_sound_map.clear()
 
     def set_volume(self, module_index: int, volume: int) -> bool:
         """Set volume for a module.
@@ -149,3 +198,76 @@ class SoundManager:
         """
 
         return self.audio_player.set_volume(module_index, volume)
+
+    def handle_sound_ended(self, title: str, module_idx: int) -> None:
+        """Handle end-of-playback for a sound.
+
+        Checks for loop_count and chain_next config and takes appropriate action.
+
+        Args:
+            title: Sound title that ended
+            module_idx: Module index where it was playing
+        """
+
+        sound: dict | None = self.get_sound_by_title(title)
+        if sound is None:
+            return
+
+        try:
+            # Check if there are remaining loops
+            loop_count_remaining: int = 0
+            if module_idx in self._module_sound_map:
+                map_entry = self._module_sound_map[module_idx]
+                if isinstance(map_entry, tuple):
+                    _, loop_count_remaining = map_entry
+            
+            if loop_count_remaining > 0:
+                loop_count_remaining -= 1
+                print(f"sound: loop title='{title}' module={module_idx} remaining_loops={loop_count_remaining}")
+                file_number: int = int(sound.get("file", 0))
+                high_quality: bool = bool(sound.get("high_quality", False))
+                self.audio_player.players[module_idx].play_file(file_number)
+                self._module_sound_map[module_idx] = (title, loop_count_remaining)
+                return
+
+            # Check if there's a next sound to chain
+            chain_next: str | None = sound.get("chain_next")
+            if chain_next:
+                print(f"sound: chain from '{title}' to '{chain_next}'")
+                try:
+                    self.play_sound(chain_next)
+                except (ValueError, NoPlayersAvailable) as err:
+                    print(f"sound: chain failed from '{title}' to '{chain_next}': {err}")
+                return
+
+            # Sound ended without looping or chaining - clear the module map
+            if module_idx in self._module_sound_map:
+                del self._module_sound_map[module_idx]
+            print(f"sound: ended title='{title}' module={module_idx}")
+
+        except (AttributeError, IndexError, OSError) as err:
+            print(f"sound: handle_sound_ended error for title='{title}': {err}")
+
+    def check_for_ended_sounds(self) -> None:
+        """Check for sounds that have ended since last check.
+
+        This is called by the audio polling system to detect transitions.
+        When a sound transitions from playing→stopped, handle loop/chain logic.
+        """
+
+        current: dict = self.get_playing_sounds()
+
+        # Detect transitions from playing to stopped
+        for module_idx, was_playing_title in self._previous_playing_state.items():
+            if was_playing_title is None:
+                continue
+
+            is_now_playing_title: str | None = current.get(module_idx)
+            if is_now_playing_title is None:
+                # Sound ended on this module
+                self.handle_sound_ended(was_playing_title, module_idx)
+                # After handling, update current state with whatever the handler decided
+                # (it might have replayed the sound, chained to next, etc.)
+                current = self.get_playing_sounds()
+
+        self._previous_playing_state = current.copy()
