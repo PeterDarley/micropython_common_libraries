@@ -37,6 +37,15 @@ class Animation:
         self.jobs_callbacks = stop_callbacks if stop_callbacks is not None else {}
         self._paused_state = None
 
+    def _run_stop_callbacks(self) -> None:
+        """Run registered stop callbacks, logging but not raising callback errors."""
+
+        for name, callback in self.jobs_callbacks.items():
+            try:
+                callback()
+            except Exception as error:
+                print(f"animation: stop callback error for {name}: {error}")
+
     def add_job(self, name: str, job):
         """Add a job to the animation."""
 
@@ -55,6 +64,7 @@ class Animation:
                 print(f"animation: tick error: {e}")
             time.sleep_ms(self.frame_interval_ms)
 
+        self._run_stop_callbacks()
         self.running = False
 
     def start(self):
@@ -74,11 +84,15 @@ class Animation:
     def stop(self):
         """Stop the animation loop."""
 
-        self.stopped = True
-        self.running = False
+        if self.stopped:
+            return
 
-        for name, callback in self.jobs_callbacks.items():
-            callback()
+        self.stopped = True
+
+        # If the loop is not running, execute callbacks immediately.
+        # Otherwise, `_run` executes callbacks once the loop exits.
+        if not self.running:
+            self._run_stop_callbacks()
 
     def reset(self):
         """Reset the animation to its initial state."""
