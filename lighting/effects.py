@@ -1,5 +1,7 @@
 """Effect runtime mixin for lighting scene processing."""
 
+import sys
+
 
 class EffectRuntimeMixin:
     """Provides effect resolution and per-tick execution."""
@@ -268,9 +270,23 @@ class EffectRuntimeMixin:
 
         for active_scene_name in list(self._active_scenes):
             if self._is_scene_finished(active_scene_name):
+                # Trigger any scenes configured to start when this scene finishes
+                scene_meta: dict = self.settings.get("scene_settings", {}).get(active_scene_name, {})
+                trigger_scenes: list = scene_meta.get("trigger_scenes_on_completion", [])
+                for trigger_scene_name in trigger_scenes:
+                    if trigger_scene_name in self.settings.get("scenes", {}):
+                        try:
+                            self.add_scene(trigger_scene_name)
+                        except Exception as error:
+                            print(
+                                f"lighting: failed to trigger scene scene={active_scene_name} trigger={trigger_scene_name}: {error}"
+                            )
+                            sys.print_exception(error)
+
                 self.remove_scene(active_scene_name)
 
         try:
             self.leds.show()
         except Exception as e:
             print(f"lighting: leds.show() failed: {e}")
+            sys.print_exception(e)

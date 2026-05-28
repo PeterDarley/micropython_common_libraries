@@ -4,6 +4,7 @@ Manages the mapping of sound titles to file numbers and coordinates playback
 across available YX5200 modules.
 """
 
+import sys
 from audio import AudioPlayer, NoPlayersAvailable
 from storage import PersistentDict
 
@@ -30,6 +31,8 @@ class SoundManager:
         self._last_health: dict = {}
         self._module_sound_map: dict = {}  # Maps module_idx to (title, loop_count_remaining)
         self._previous_playing_state: dict = {}
+        self._active_soundscape: str = None  # Name of currently playing soundscape
+        self._soundscape_state: dict = {}  # Tracks progress within soundscape
 
     def get_last_health(self) -> dict:
         """Return the most recent health-check results."""
@@ -66,7 +69,7 @@ class SoundManager:
         sounds: dict = storage.get("sounds", {})
         return sounds
 
-    def get_sound_by_title(self, title: str) -> dict | None:
+    def get_sound_by_title(self, title: str) -> dict:
         """Get a specific sound by title.
 
         Args:
@@ -109,7 +112,9 @@ class SoundManager:
         module_idx: int = self.audio_player.play_file(file_number, high_quality_preferred=high_quality)
 
         loop_count: int = int(sound.get("loop_count", 0))
-        print(f"sound: start title='{title}' file={file_number} module={module_idx} hq={high_quality} loop_count={loop_count}")
+        print(
+            f"sound: start title='{title}' file={file_number} module={module_idx} hq={high_quality} loop_count={loop_count}"
+        )
 
         # Track which sound is playing on this module, along with remaining loop count
         self._module_sound_map[module_idx] = (title, loop_count)
@@ -185,6 +190,187 @@ class SoundManager:
 
         self.audio_player.stop_all()
         self._module_sound_map.clear()
+        self._active_soundscape = None
+        self._soundscape_state = {}
+
+    def get_soundscapes(self) -> dict:
+        """Get all configured soundscapes.
+
+        Returns:
+            Dict of {name: {entries}}
+        """
+
+        storage: PersistentDict = PersistentDict()
+        lighting_root = storage.get("lighting_settings", {})
+        models = lighting_root.get("models") if isinstance(lighting_root, dict) else None
+        if models:
+            current = lighting_root.get("current_model")
+            if current and isinstance(models.get(current, {}), dict):
+                return models.get(current, {}).get("soundscapes", {})
+        return {}
+
+    def get_soundscape(self, name: str) -> dict:
+        """Get a soundscape by name.
+
+        Args:
+            name: Soundscape name
+
+        Returns:
+            Soundscape dict or empty dict if not found
+        """
+
+        soundscapes: dict = self.get_soundscapes()
+        return soundscapes.get(name, {})
+
+    def play_soundscape(self, name: str) -> bool:
+        """Start playing a soundscape.
+
+        Args:
+            name: Soundscape name to play
+
+        Returns:
+            True if soundscape started, False if not found or error
+        """
+
+        soundscape: dict = self.get_soundscape(name)
+        if not soundscape:
+            print(f"soundscape: not found name='{name}'")
+            return False
+
+        self.stop_all()
+        self._active_soundscape = name
+        self._soundscape_state = {}
+
+        print(f"soundscape: start name='{name}'")
+        return self._play_next_soundscape_entry(name)
+
+    def _play_next_soundscape_entry(self, soundscape_name: str) -> bool:
+        """Play the next entry in a soundscape.
+
+        Args:
+            soundscape_name: Name of the soundscape
+
+        Returns:
+            True if an entry was played, False if soundscape is complete
+        """
+
+        soundscape: dict = self.get_soundscape(soundscape_name)
+        if not soundscape:
+            self._active_soundscape = None
+            return False
+
+        # Find the next entry that should play
+        entries: dict = soundscape if isinstance(soundscape, dict) else {}
+
+        for entry_name, entry_data in entries.items():
+            if not isinstance(entry_data, dict):
+                continue
+
+            # Get current state for this entry
+            entry_state = self._soundscape_state.get(entry_name, {})
+            is_started = isinstance(entry_state, dict) and entry_state.get("started", False)
+
+            if not is_started:
+                # Check if this entry has an "after" dependency
+                after_entry = entry_data.get("after")
+                if after_entry:
+                    after_state = self._soundscape_state.get(after_entry, {})
+                    after_complete = isinstance(after_state, dict) and after_state.get("complete", False)
+                    if not after_complete:
+                        # Predecessor hasn't finished yet, skip
+                        continue
+
+                # Play this entry for the first time
+                sound_title = entry_data.get("sound", "")
+                repeat_count_raw = entry_data.get("repeat", 0)
+                repeat_count: int = int(repeat_count_raw) if str(repeat_count_raw).isdigit() else 0
+                repeat_enabled: bool = bool(entry_data.get("repeat_enabled", False))
+                if not repeat_enabled and repeat_count > 0:
+                    # Backward compatibility for entries created before repeat_enabled existed.
+                    repeat_enabled = True
+                repeat_infinite: bool = repeat_enabled and repeat_count == 0
+
+                if not sound_title:
+                    self._soundscape_state[entry_name] = {"started": True, "complete": True}
+                    continue
+
+                try:
+                    self.play_sound(sound_title)
+                    self._soundscape_state[entry_name] = {
+                        "started": True,
+                        "title": sound_title,
+                        "repeat_enabled": repeat_enabled,
+                        "repeat_infinite": repeat_infinite,
+                        "repeat_count": repeat_count,
+                        "repeat_remaining": repeat_count,
+                        "complete": False,
+                    }
+                    if not repeat_enabled:
+                        repeat_mode = "off"
+                    elif repeat_infinite:
+                        repeat_mode = "infinite"
+                    else:
+                        repeat_mode = str(repeat_count)
+
+                    print(
+                        f"soundscape: playing entry={entry_name} sound='{sound_title}' "
+                        f"repeat_enabled={repeat_enabled} repeat_mode={repeat_mode}"
+                    )
+                    return True
+                except (ValueError, NoPlayersAvailable) as err:
+                    print(f"soundscape: failed to play entry={entry_name} sound='{sound_title}': {err}")
+                    sys.print_exception(err)
+                    self._soundscape_state[entry_name] = {"started": True, "complete": True}
+                    continue
+
+            else:
+                # Entry was already started, check if it needs to repeat
+                if isinstance(entry_state, dict):
+                    repeat_infinite = bool(entry_state.get("repeat_infinite", False))
+                    repeat_remaining = entry_state.get("repeat_remaining", 0)
+                    sound_title = entry_state.get("title", "")
+
+                    if repeat_infinite:
+                        print(f"soundscape: repeating entry={entry_name} sound='{sound_title}' remaining=infinite")
+                        try:
+                            self.play_sound(sound_title)
+                            return True
+                        except (ValueError, NoPlayersAvailable) as err:
+                            print(f"soundscape: failed to repeat entry={entry_name}: {err}")
+                            sys.print_exception(err)
+                            entry_state["complete"] = True
+                            continue
+
+                    if repeat_remaining > 0:
+                        repeat_remaining -= 1
+                        print(
+                            f"soundscape: repeating entry={entry_name} sound='{sound_title}' remaining={repeat_remaining}"
+                        )
+                        try:
+                            self.play_sound(sound_title)
+                            entry_state["repeat_remaining"] = repeat_remaining
+                            if repeat_remaining == 0:
+                                entry_state["complete"] = True
+                            return True
+                        except (ValueError, NoPlayersAvailable) as err:
+                            print(f"soundscape: failed to repeat entry={entry_name}: {err}")
+                            sys.print_exception(err)
+                            entry_state["complete"] = True
+                            continue
+                    else:
+                        # This entry is complete, mark it
+                        entry_state["complete"] = True
+
+        # No more entries to play
+        print(f"soundscape: complete name='{soundscape_name}'")
+        self._active_soundscape = None
+        self._soundscape_state = {}
+        return False
+
+    def get_active_soundscape(self):
+        """Return the name of the currently playing soundscape, or None."""
+
+        return self._active_soundscape
 
     def set_volume(self, module_index: int, volume: int) -> bool:
         """Set volume for a module.
@@ -202,7 +388,7 @@ class SoundManager:
     def handle_sound_ended(self, title: str, module_idx: int) -> None:
         """Handle end-of-playback for a sound.
 
-        Checks for loop_count and chain_next config and takes appropriate action.
+        Checks for loop_count and chain_next config, soundscape advancement, and takes appropriate action.
 
         Args:
             title: Sound title that ended
@@ -220,7 +406,7 @@ class SoundManager:
                 map_entry = self._module_sound_map[module_idx]
                 if isinstance(map_entry, tuple):
                     _, loop_count_remaining = map_entry
-            
+
             if loop_count_remaining > 0:
                 loop_count_remaining -= 1
                 print(f"sound: loop title='{title}' module={module_idx} remaining_loops={loop_count_remaining}")
@@ -228,6 +414,12 @@ class SoundManager:
                 high_quality: bool = bool(sound.get("high_quality", False))
                 self.audio_player.players[module_idx].play_file(file_number)
                 self._module_sound_map[module_idx] = (title, loop_count_remaining)
+                return
+
+            # Check if we're in a soundscape and need to advance to next entry
+            if self._active_soundscape:
+                soundscape_name: str = self._active_soundscape
+                self._play_next_soundscape_entry(soundscape_name)
                 return
 
             # Check if there's a next sound to chain
@@ -238,6 +430,7 @@ class SoundManager:
                     self.play_sound(chain_next)
                 except (ValueError, NoPlayersAvailable) as err:
                     print(f"sound: chain failed from '{title}' to '{chain_next}': {err}")
+                    sys.print_exception(err)
                 return
 
             # Sound ended without looping or chaining - clear the module map
@@ -247,6 +440,7 @@ class SoundManager:
 
         except (AttributeError, IndexError, OSError) as err:
             print(f"sound: handle_sound_ended error for title='{title}': {err}")
+            sys.print_exception(err)
 
     def check_for_ended_sounds(self) -> None:
         """Check for sounds that have ended since last check.

@@ -4,6 +4,7 @@ Supports 0-3 modules connected to separate UARTs. Each module plays from an SD c
 with MP3 files in the /MP3/ folder numbered 0001.mp3, 0002.mp3, etc.
 """
 
+import sys
 from machine import UART  # type: ignore
 from time import sleep, time
 from storage import PersistentDict
@@ -56,6 +57,7 @@ class YX5200Player:
             self.uart: UART = UART(uart_id, baudrate=_BAUD_RATE, tx=tx_pin, rx=rx_pin, bits=8, stop=1)
         except (AttributeError, OSError, TypeError, ValueError) as err:
             print(f"YX5200: UART {uart_id} (tx={tx_pin}, rx={rx_pin}) init error: {err}")
+            sys.print_exception(err)
             self.uart = None
 
     def _build_frame(self, cmd: int, param: int = 0) -> bytes:
@@ -130,6 +132,7 @@ class YX5200Player:
             return True
         except (AttributeError, OSError, TypeError, ValueError) as err:
             print(f"YX5200: UART {self.uart_id} (tx={self.tx_pin}, rx={self.rx_pin}) " f"write error: {err}")
+            sys.print_exception(err)
             return False
 
     def play_file(self, file_number: int) -> bool:
@@ -405,6 +408,7 @@ class AudioPlayer:
             self.debug_logging: bool = bool(system_settings.get("audio_debug_logging", False))
         except (AttributeError, OSError, TypeError, ValueError) as error:
             print(f"AudioPlayer: reading master volume failed: {error}")
+            sys.print_exception(error)
             self.master_volume = 20
             self.reset_on_boot = True
             self.debug_logging = False
@@ -420,6 +424,7 @@ class AudioPlayer:
                     print(f"AudioPlayer: boot reset module {i} ok={reset_ok}")
                 except (AttributeError, OSError, TypeError, ValueError) as error:
                     print(f"AudioPlayer: boot reset failed for module {i}: {error}")
+                    sys.print_exception(error)
 
         # Perform a quick health check on configured modules at init/boot
         try:
@@ -427,11 +432,12 @@ class AudioPlayer:
         except (AttributeError, OSError, TypeError, ValueError) as error:
             # Non-fatal: ensure init continues even if health checks fail
             print(f"AudioPlayer: initial health check failed: {error}")
+            sys.print_exception(error)
 
         # Initialize continuous polling state
         self._active_players: list = []
         self._current_poll_index: int = 0
-        self._polling_timer_id: int | None = None
+        self._polling_timer_id = None
 
     def check_health(self) -> dict:
         """Check basic responsiveness of all configured players.
@@ -475,6 +481,7 @@ class AudioPlayer:
                 )
             except (AttributeError, OSError, TypeError, ValueError) as err:
                 print(f"AudioPlayer: health check failed for module {i}: {err}")
+                sys.print_exception(err)
                 results[i] = {"ok": False, "state": None, "uart": None}
 
         healthy = sum(1 for v in results.values() if v.get("ok"))
@@ -583,13 +590,18 @@ class AudioPlayer:
             return
 
         try:
+            from math import inf
+
             timer_mgr: TimerManager = TimerManager()
-            self._polling_timer_id = timer_mgr.allocate_periodic_timer(100, self._poll_tick)
+            timer = timer_mgr.get_timer(callback=self._poll_tick, periods=[100], cycles=inf)
+            self._polling_timer_id = timer
             print("AudioPlayer: continuous polling started (100ms interval)")
         except (AttributeError, OSError, TypeError, ValueError) as error:
             print(f"AudioPlayer: failed to start continuous polling: {error}")
+            sys.print_exception(error)
+            raise
 
-    def _poll_tick(self) -> None:
+    def _poll_tick(self, _timer=None) -> None:
         """Poll one active player per 100ms tick, staggered across all active players.
 
         This method is called by the background timer every 100ms. It maintains
@@ -615,9 +627,15 @@ class AudioPlayer:
             # Check for sounds that ended and handle loop/chain logic
             try:
                 from sounds import SoundManager
+
                 SoundManager().check_for_ended_sounds()
             except (AttributeError, ImportError, OSError):
                 pass
 
         except (AttributeError, OSError, TypeError, ValueError, IndexError) as error:
             print(f"AudioPlayer: polling tick error: {error}")
+            sys.print_exception(error)
+            if self._polling_timer_id is not None:
+                self._polling_timer_id.stop("kill")
+                self._polling_timer_id = None
+            raise

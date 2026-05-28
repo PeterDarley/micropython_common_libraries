@@ -69,7 +69,10 @@ class OnboardLED:
         try:
             self._led = neopixel.NeoPixel(Pin(pin), 1)
         except Exception as error:
+            import sys
+
             print("OnboardLED: failed to initialise:", error)
+            sys.print_exception(error)
             self._led = None
 
     def set(self, r: int, g: int, b: int) -> None:

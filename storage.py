@@ -15,6 +15,7 @@ Usage:
 """
 
 import json
+import sys
 
 
 class PersistentDict:
@@ -80,6 +81,7 @@ class PersistentDict:
                 json.dump(self._data if self._data is not None else {}, file_handle)
         except Exception as error:
             print(f"storage.store() error: {error}")
+            sys.print_exception(error)
             raise
 
     def __setitem__(self, key, value):

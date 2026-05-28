@@ -1,5 +1,6 @@
 """Package to facilitate communications."""
 
+import sys
 import settings
 import micropython  # type: ignore
 from collections import OrderedDict
@@ -124,6 +125,7 @@ class WIFIManager:
 
         except OSError as error:
             print(f"WiFi: SSID scan failed ({error}), using stored value")
+            sys.print_exception(error)
 
         return target_ssid
 
@@ -155,13 +157,14 @@ class WIFIManager:
                         self.connect_callback()
                     except (AttributeError, TypeError) as error:
                         print(f"WiFi: connect callback failed: {error}")
-                        pass
+                        sys.print_exception(error)
 
     def _run_connect_callback(self, _) -> None:
         try:
             self.connect_callback()
         except (AttributeError, TypeError) as error:
             print(f"WiFi: scheduled connect callback failed: {error}")
+            sys.print_exception(error)
 
 
 class LEDManager:

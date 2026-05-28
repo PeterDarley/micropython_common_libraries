@@ -1,3 +1,4 @@
+import sys
 import time
 
 try:
@@ -45,6 +46,7 @@ class Animation:
                 callback()
             except Exception as error:
                 print(f"animation: stop callback error for {name}: {error}")
+                sys.print_exception(error)
 
     def add_job(self, name: str, job):
         """Add a job to the animation."""
@@ -62,6 +64,7 @@ class Animation:
                 self.tick()
             except Exception as e:
                 print(f"animation: tick error: {e}")
+                sys.print_exception(e)
             time.sleep_ms(self.frame_interval_ms)
 
         self._run_stop_callbacks()

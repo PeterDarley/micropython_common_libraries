@@ -1,3 +1,4 @@
+import sys
 from animation import Animation
 from leds import LEDs
 from storage import PersistentDict
@@ -75,6 +76,7 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
             self.settings_object.store()
         except (OSError, ValueError, TypeError) as error:
             print(f"lighting: failed to store settings: {error}")
+            sys.print_exception(error)
 
     def _load_lighting_root(self) -> None:
         """Load lighting settings from persistent storage and select the active model."""
@@ -295,6 +297,7 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
             manager.play_sound(sound_name)
         except Exception as error:
             print(f"lighting: failed to play scene sound scene={scene_name} sound={sound_name}: {error}")
+            sys.print_exception(error)
 
     def _stop_scene_sounds(self, scene_name: str, setting_key: str) -> None:
         """Stop configured sounds for a scene lifecycle event.
@@ -329,6 +332,7 @@ class Lighting(EffectRuntimeMixin, PatternMixin, FilterMixin):
                 "lighting: failed to stop scene sounds "
                 f"scene={scene_name} setting={setting_key} titles={normalized_titles}: {error}"
             )
+            sys.print_exception(error)
 
     def set_scene(self, scene_name: str = None, **kwargs) -> None:
         """Replace all active scenes with a single scene and reset state."""
