@@ -9,6 +9,50 @@ from audio import AudioPlayer, NoPlayersAvailable
 from storage import PersistentDict
 
 
+def _is_enabled_setting(value: object) -> bool:
+    """Return True when a setting value represents an enabled/checked state."""
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, int):
+        return value != 0
+
+    if isinstance(value, str):
+        normalized: str = value.strip().lower()
+        return normalized in ("1", "true", "yes", "on")
+
+    return bool(value)
+
+
+def _parse_non_negative_int(value: object) -> int:
+    """Parse value as a non-negative integer, tolerating numeric strings/floats."""
+
+    try:
+        if isinstance(value, bool):
+            return int(value)
+
+        if isinstance(value, int):
+            return max(0, value)
+
+        if isinstance(value, float):
+            return max(0, int(value))
+
+        if isinstance(value, str):
+            normalized: str = value.strip()
+            if not normalized:
+                return 0
+
+            if "." in normalized:
+                return max(0, int(float(normalized)))
+
+            return max(0, int(normalized))
+
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 class SoundManager:
     """Manages sound playback by title."""
 
@@ -82,11 +126,13 @@ class SoundManager:
         sounds: dict = self.get_sounds()
         return sounds.get(title)
 
-    def play_sound(self, title: str) -> int:
+    def play_sound(self, title: str, loop_count_override: int = -1) -> int:
         """Play a sound by title.
 
         Args:
             title: Sound title to play
+            loop_count_override: Optional loop-count override. Use -1 to keep
+                configured loop_count; use 0+ to force an explicit loop count.
 
         Returns:
             Module index that started playback
@@ -111,7 +157,10 @@ class SoundManager:
 
         module_idx: int = self.audio_player.play_file(file_number, high_quality_preferred=high_quality)
 
-        loop_count: int = int(sound.get("loop_count", 0))
+        configured_loop_count: int = _parse_non_negative_int(sound.get("loop_count", 0))
+        loop_count: int = (
+            configured_loop_count if loop_count_override < 0 else _parse_non_negative_int(loop_count_override)
+        )
         print(
             f"sound: start title='{title}' file={file_number} module={module_idx} hq={high_quality} loop_count={loop_count}"
         )
@@ -283,11 +332,12 @@ class SoundManager:
                 # Play this entry for the first time
                 sound_title = entry_data.get("sound", "")
                 repeat_count_raw = entry_data.get("repeat", 0)
-                repeat_count: int = int(repeat_count_raw) if str(repeat_count_raw).isdigit() else 0
-                repeat_enabled: bool = bool(entry_data.get("repeat_enabled", False))
-                if not repeat_enabled and repeat_count > 0:
+                repeat_count: int = _parse_non_negative_int(repeat_count_raw)
+                if "repeat_enabled" in entry_data:
+                    repeat_enabled: bool = _is_enabled_setting(entry_data.get("repeat_enabled", False))
+                else:
                     # Backward compatibility for entries created before repeat_enabled existed.
-                    repeat_enabled = True
+                    repeat_enabled = repeat_count > 0
                 repeat_infinite: bool = repeat_enabled and repeat_count == 0
 
                 if not sound_title:
@@ -295,10 +345,11 @@ class SoundManager:
                     continue
 
                 try:
-                    self.play_sound(sound_title)
+                    module_idx: int = self.play_sound(sound_title, loop_count_override=0)
                     self._soundscape_state[entry_name] = {
                         "started": True,
                         "title": sound_title,
+                        "module_idx": module_idx,
                         "repeat_enabled": repeat_enabled,
                         "repeat_infinite": repeat_infinite,
                         "repeat_count": repeat_count,
@@ -326,14 +377,20 @@ class SoundManager:
             else:
                 # Entry was already started, check if it needs to repeat
                 if isinstance(entry_state, dict):
+                    repeat_enabled: bool = bool(entry_state.get("repeat_enabled", False))
                     repeat_infinite = bool(entry_state.get("repeat_infinite", False))
                     repeat_remaining = entry_state.get("repeat_remaining", 0)
                     sound_title = entry_state.get("title", "")
 
+                    if not repeat_enabled:
+                        entry_state["complete"] = True
+                        continue
+
                     if repeat_infinite:
                         print(f"soundscape: repeating entry={entry_name} sound='{sound_title}' remaining=infinite")
                         try:
-                            self.play_sound(sound_title)
+                            module_idx = self.play_sound(sound_title, loop_count_override=0)
+                            entry_state["module_idx"] = module_idx
                             return True
                         except (ValueError, NoPlayersAvailable) as err:
                             print(f"soundscape: failed to repeat entry={entry_name}: {err}")
@@ -347,7 +404,8 @@ class SoundManager:
                             f"soundscape: repeating entry={entry_name} sound='{sound_title}' remaining={repeat_remaining}"
                         )
                         try:
-                            self.play_sound(sound_title)
+                            module_idx = self.play_sound(sound_title, loop_count_override=0)
+                            entry_state["module_idx"] = module_idx
                             entry_state["repeat_remaining"] = repeat_remaining
                             if repeat_remaining == 0:
                                 entry_state["complete"] = True
@@ -416,11 +474,33 @@ class SoundManager:
                 self._module_sound_map[module_idx] = (title, loop_count_remaining)
                 return
 
-            # Check if we're in a soundscape and need to advance to next entry
+            # Check if we're in a soundscape and only advance when the ended
+            # sound matches an active soundscape entry.
             if self._active_soundscape:
-                soundscape_name: str = self._active_soundscape
-                self._play_next_soundscape_entry(soundscape_name)
-                return
+                matched_active_entry: bool = False
+                for entry_state in self._soundscape_state.values():
+                    if not isinstance(entry_state, dict):
+                        continue
+
+                    if entry_state.get("complete", False):
+                        continue
+
+                    expected_title: str = str(entry_state.get("title", ""))
+                    expected_module_idx = entry_state.get("module_idx")
+
+                    if expected_title != title:
+                        continue
+
+                    if expected_module_idx is not None and expected_module_idx != module_idx:
+                        continue
+
+                    matched_active_entry = True
+                    break
+
+                if matched_active_entry:
+                    soundscape_name: str = self._active_soundscape
+                    self._play_next_soundscape_entry(soundscape_name)
+                    return
 
             # Check if there's a next sound to chain
             chain_next: str | None = sound.get("chain_next")
