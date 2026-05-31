@@ -5,6 +5,7 @@ across available YX5200 modules.
 """
 
 import sys
+from time import sleep
 from audio import AudioPlayer, NoPlayersAvailable
 from storage import PersistentDict
 
@@ -206,6 +207,125 @@ class SoundManager:
             return
 
         self._stop_sounds_by_title(normalized_titles)
+
+    def stop_sound(self, title: str, module_idx: int | None = None) -> bool:
+        """Stop a specific sound reliably, retrying if needed.
+
+        Sends multiple stop commands with drain/delays to overcome UART
+        contention. Does NOT optimistically mark state — only marks stopped
+        after hardware confirms via status query.
+
+        Args:
+            title: Sound title expected to be playing.
+            module_idx: Preferred module index to stop.
+
+        Returns:
+            True if the sound appears stopped on at least one matching module.
+        """
+
+        if not isinstance(title, str) or not title.strip():
+            return False
+
+        normalized_title: str = title.strip()
+        candidate_modules: list[int] = []
+
+        if isinstance(module_idx, int) and 0 <= module_idx < len(self.audio_player.players):
+            candidate_modules.append(module_idx)
+
+        # Also locate modules by current playing title in case the posted index
+        # is stale or the sound was reassigned to another module.
+        playing_state: dict = self.get_playing_sounds()
+        for playing_module_idx, playing_title in playing_state.items():
+            if playing_title == normalized_title and playing_module_idx not in candidate_modules:
+                candidate_modules.append(playing_module_idx)
+
+        if not candidate_modules:
+            return False
+
+        stopped_any: bool = False
+        for candidate_module_idx in candidate_modules:
+            try:
+                player = self.audio_player.players[candidate_module_idx]
+            except (AttributeError, IndexError):
+                continue
+
+            # Send multiple stop commands with delays. Use update_state=False so
+            # we don't prematurely flip cached state — only hardware confirmation
+            # should drive state changes.
+            for attempt in range(5):
+                try:
+                    # Drain any pending RX bytes that might be confusing the UART
+                    try:
+                        if player.uart:
+                            player.uart.read()
+                    except (AttributeError, OSError):
+                        pass
+
+                    player.stop(update_state=False)
+                    sleep(0.15)
+
+                    # Temporarily bypass the multi-confirmation requirement by
+                    # directly reading hardware status for verification.
+                    try:
+                        if player.uart:
+                            player.uart.read()  # drain
+                    except (AttributeError, OSError):
+                        pass
+
+                    from audio import _CMD_QUERY_STATUS, _STATUS_PLAYING
+
+                    frame = player._build_frame(_CMD_QUERY_STATUS, 0)
+                    player.uart.write(frame)
+                    sleep(0.1)
+                    resp = player.uart.read()
+
+                    if resp and len(resp) >= 10:
+                        parsed = player._find_response_frame(resp, _CMD_QUERY_STATUS)
+                        if parsed is not None:
+                            status_high, status_low = parsed
+                            hw_playing = (status_low == _STATUS_PLAYING) or (status_high == _STATUS_PLAYING)
+                            print(
+                                f"audio: stop verify uart={player.uart_id} "
+                                f"attempt={attempt + 1} hw_playing={hw_playing}"
+                            )
+                            if not hw_playing:
+                                stopped_any = True
+                                break
+                            # Hardware still playing — loop will retry
+                            continue
+
+                    # Inconclusive read — retry
+                    print(
+                        f"audio: stop verify inconclusive uart={player.uart_id} "
+                        f"attempt={attempt + 1}"
+                    )
+                except (AttributeError, OSError, TypeError, ValueError, IndexError) as err:
+                    print(f"audio: stop attempt error uart={player.uart_id}: {err}")
+                    break
+
+            # Update cached state based on outcome
+            if stopped_any:
+                player.is_playing = False
+                player.current_file = None
+                player._pending_stop_confirmations = 0
+
+                # Clear manager-side bookkeeping for that module.
+                if candidate_module_idx in self._module_sound_map:
+                    del self._module_sound_map[candidate_module_idx]
+
+                # If this was driving a soundscape, stop the soundscape state too.
+                if self._active_soundscape:
+                    self._active_soundscape = None
+                    self._soundscape_state = {}
+
+                print(f"sound: stopped title='{normalized_title}' module={candidate_module_idx}")
+            else:
+                print(
+                    f"sound: stop FAILED title='{normalized_title}' "
+                    f"module={candidate_module_idx} (hardware still playing)"
+                )
+
+        return stopped_any
 
     def get_playing_sounds(self) -> dict:
         """Get currently playing sounds.
@@ -427,6 +547,15 @@ class SoundManager:
 
     def get_active_soundscape(self):
         """Return the name of the currently playing soundscape, or None."""
+
+        if self._active_soundscape:
+            # Self-heal stale UI/runtime state: if no module is currently
+            # playing, advance/complete the soundscape now.
+            playing_sounds: dict = self.get_playing_sounds()
+            any_module_playing: bool = any(title is not None for title in playing_sounds.values())
+            if not any_module_playing:
+                soundscape_name: str = self._active_soundscape
+                self._play_next_soundscape_entry(soundscape_name)
 
         return self._active_soundscape
 

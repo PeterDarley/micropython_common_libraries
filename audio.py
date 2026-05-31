@@ -51,6 +51,7 @@ class YX5200Player:
         self.is_playing: bool = False
         self.start_time: float = 0.0
         self._pending_stop_confirmations: int = 0
+        self._required_stop_confirmations: int = 6
         self.last_polled: float = 0.0
 
         try:
@@ -160,11 +161,17 @@ class YX5200Player:
 
         return self.send_command(_CMD_PAUSE)
 
-    def stop(self) -> bool:
-        """Stop playback."""
+    def stop(self, update_state: bool = True) -> bool:
+        """Stop playback.
+
+        Args:
+            update_state: If True (default), immediately mark cached state as
+                stopped. Set to False when the caller will verify via
+                query_status() and manage state itself.
+        """
 
         success: bool = self.send_command(_CMD_STOP)
-        if success:
+        if success and update_state:
             self.is_playing = False
             self.current_file = None
             self._pending_stop_confirmations = 0
@@ -314,15 +321,16 @@ class YX5200Player:
                     f"status_param=0x{status_param:04X}"
                 )
 
-            # Some modules briefly report a non-playing state right after play
-            # starts or while transitioning tracks. Require two consecutive
-            # stopped observations before clearing active playback state.
+            # Some modules briefly report a non-playing state while a track is
+            # still audible. Require several consecutive stopped observations
+            # before clearing active playback state.
             if not is_playing and self.is_playing:
                 self._pending_stop_confirmations += 1
                 print(
-                    f"audio: status stop pending uart={self.uart_id} " f"confirm={self._pending_stop_confirmations}/2"
+                    f"audio: status stop pending uart={self.uart_id} "
+                    f"confirm={self._pending_stop_confirmations}/{self._required_stop_confirmations}"
                 )
-                if self._pending_stop_confirmations < 2:
+                if self._pending_stop_confirmations < self._required_stop_confirmations:
                     return True
             else:
                 self._pending_stop_confirmations = 0

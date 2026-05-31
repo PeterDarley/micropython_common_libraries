@@ -405,17 +405,26 @@ class OTAUpdater:
 
                         remote_paths_set.add(file_path)
 
+                        # Build entry with submodule origin so apply can download
+                        # from the correct repository.
+                        submodule_origin: dict = {
+                            "owner": submodule_owner,
+                            "repo": submodule_repo,
+                            "sha": submodule_sha,
+                            "rel_path": submodule_file_path,
+                        }
+
                         if file_path not in local_files_set:
-                            updates.append({"path": file_path, "status": "added"})
+                            updates.append({"path": file_path, "status": "added", "submodule": submodule_origin})
                             continue
 
                         local_sha: str = self._local_git_blob_sha(file_path)
                         if local_sha != remote_sha:
                             # If we have a stored commit, distinguish between repo changes and local-only mods
                             if stored_commit:
-                                updates.append({"path": file_path, "status": "locally_modified"})
+                                updates.append({"path": file_path, "status": "locally_modified", "submodule": submodule_origin})
                             else:
-                                updates.append({"path": file_path, "status": "modified"})
+                                updates.append({"path": file_path, "status": "modified", "submodule": submodule_origin})
 
                     self._debug_log("submodule_done", "path={} updates={}".format(submodule_path, len(updates)))
 
@@ -518,7 +527,16 @@ class OTAUpdater:
 
             if status in ("added", "modified"):
                 try:
-                    file_bytes = self._download_raw_file(path, branch_name)
+                    submodule_info: dict = update_entry.get("submodule", {})
+                    if submodule_info:
+                        file_bytes = self._download_submodule_file(
+                            submodule_info["owner"],
+                            submodule_info["repo"],
+                            submodule_info["sha"],
+                            submodule_info["rel_path"],
+                        )
+                    else:
+                        file_bytes = self._download_raw_file(path, branch_name)
                     self._write_file(path, file_bytes)
                     applied_files.append(path)
                 except Exception as error:
@@ -731,6 +749,16 @@ class OTAUpdater:
         status_code, response_headers, body = self._http_get(url)
         if status_code != 200:
             raise OSError("File download failed for {} (HTTP {})".format(path, status_code))
+
+        return body
+
+    def _download_submodule_file(self, owner: str, repo: str, commit_sha: str, rel_path: str) -> bytes:
+        """Download a file from a submodule repository at its pinned commit SHA."""
+
+        url = self._GITHUB_RAW_BASE + "/" + owner + "/" + repo + "/" + commit_sha + "/" + rel_path
+        status_code, response_headers, body = self._http_get(url)
+        if status_code != 200:
+            raise OSError("File download failed for {}/{} @ {} (HTTP {})".format(owner, repo, rel_path, status_code))
 
         return body
 
