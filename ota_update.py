@@ -422,9 +422,13 @@ class OTAUpdater:
                         if local_sha != remote_sha:
                             # If we have a stored commit, distinguish between repo changes and local-only mods
                             if stored_commit:
-                                updates.append({"path": file_path, "status": "locally_modified", "submodule": submodule_origin})
+                                updates.append(
+                                    {"path": file_path, "status": "locally_modified", "submodule": submodule_origin}
+                                )
                             else:
-                                updates.append({"path": file_path, "status": "modified", "submodule": submodule_origin})
+                                updates.append(
+                                    {"path": file_path, "status": "modified", "submodule": submodule_origin}
+                                )
 
                     self._debug_log("submodule_done", "path={} updates={}".format(submodule_path, len(updates)))
 

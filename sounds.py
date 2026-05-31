@@ -295,10 +295,7 @@ class SoundManager:
                             continue
 
                     # Inconclusive read — retry
-                    print(
-                        f"audio: stop verify inconclusive uart={player.uart_id} "
-                        f"attempt={attempt + 1}"
-                    )
+                    print(f"audio: stop verify inconclusive uart={player.uart_id} " f"attempt={attempt + 1}")
                 except (AttributeError, OSError, TypeError, ValueError, IndexError) as err:
                     print(f"audio: stop attempt error uart={player.uart_id}: {err}")
                     break
