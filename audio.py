@@ -251,11 +251,6 @@ class YX5200Player:
             return False
 
         try:
-            if self.current_file is not None or self.is_playing:
-                print(
-                    f"audio: status check begin uart={self.uart_id} "
-                    f"file={self.current_file} cached_playing={self.is_playing}"
-                )
             self._debug(f"status check begin cached_playing={self.is_playing} current_file={self.current_file}")
 
             # Drain any stale bytes in the RX buffer before sending query.
@@ -274,11 +269,6 @@ class YX5200Player:
 
             if not resp or len(resp) < 10:
                 # Keep previous state when status read is inconclusive.
-                if self.current_file is not None or self.is_playing:
-                    print(
-                        f"audio: status inconclusive uart={self.uart_id} "
-                        f"file={self.current_file} cached_playing={self.is_playing}"
-                    )
                 self._debug(f"status inconclusive resp={resp} keep_cached={self.is_playing}")
                 return bool(self.is_playing)
 
@@ -292,11 +282,6 @@ class YX5200Player:
                     resp_hex = " ".join([f"{b:02X}" for b in resp])
                 except Exception:
                     resp_hex = str(resp)
-                if self.current_file is not None or self.is_playing:
-                    print(
-                        f"audio: status no valid frame uart={self.uart_id} "
-                        f"file={self.current_file} resp={resp_hex}"
-                    )
                 self._debug(f"status no valid frame resp={resp_hex} keep_cached={self.is_playing}")
                 return bool(self.is_playing)
 
@@ -313,23 +298,11 @@ class YX5200Player:
                 f"status_low=0x{status_low:02X} status_param=0x{status_param:04X} "
                 f"parsed_playing={is_playing} cached_before={self.is_playing}"
             )
-            if self.current_file is not None or self.is_playing or is_playing:
-                print(
-                    f"audio: status result uart={self.uart_id} "
-                    f"file={self.current_file} parsed_playing={is_playing} "
-                    f"status_high=0x{status_high:02X} status_low=0x{status_low:02X} "
-                    f"status_param=0x{status_param:04X}"
-                )
-
             # Some modules briefly report a non-playing state while a track is
             # still audible. Require several consecutive stopped observations
             # before clearing active playback state.
             if not is_playing and self.is_playing:
                 self._pending_stop_confirmations += 1
-                print(
-                    f"audio: status stop pending uart={self.uart_id} "
-                    f"confirm={self._pending_stop_confirmations}/{self._required_stop_confirmations}"
-                )
                 if self._pending_stop_confirmations < self._required_stop_confirmations:
                     return True
             else:
@@ -392,6 +365,12 @@ class AudioPlayer:
         self._initialised: bool = True
         self.players: list = []
 
+        # Initialize polling state early so attributes always exist even if
+        # later init steps raise an unexpected exception.
+        self._active_players: list = []
+        self._current_poll_index: int = 0
+        self._polling_timer_id = None
+
         storage: PersistentDict = PersistentDict()
         audio_config: list = storage.get("system_settings", {}).get("audio_players", [])
 
@@ -441,11 +420,6 @@ class AudioPlayer:
             # Non-fatal: ensure init continues even if health checks fail
             print(f"AudioPlayer: initial health check failed: {error}")
             sys.print_exception(error)
-
-        # Initialize continuous polling state
-        self._active_players: list = []
-        self._current_poll_index: int = 0
-        self._polling_timer_id = None
 
     def check_health(self) -> dict:
         """Check basic responsiveness of all configured players.

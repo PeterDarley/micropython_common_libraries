@@ -371,11 +371,7 @@ class OTAUpdater:
 
                     local_sha: str = self._local_git_blob_sha(path)
                     if local_sha != sha:
-                        # If we have a stored commit, distinguish between repo changes and local-only mods
-                        if stored_commit:
-                            updates.append({"path": path, "status": "locally_modified"})
-                        else:
-                            updates.append({"path": path, "status": "modified"})
+                        updates.append({"path": path, "status": "modified"})
         except (OSError, ValueError):
             pass
 
@@ -420,15 +416,7 @@ class OTAUpdater:
 
                         local_sha: str = self._local_git_blob_sha(file_path)
                         if local_sha != remote_sha:
-                            # If we have a stored commit, distinguish between repo changes and local-only mods
-                            if stored_commit:
-                                updates.append(
-                                    {"path": file_path, "status": "locally_modified", "submodule": submodule_origin}
-                                )
-                            else:
-                                updates.append(
-                                    {"path": file_path, "status": "modified", "submodule": submodule_origin}
-                                )
+                            updates.append({"path": file_path, "status": "modified", "submodule": submodule_origin})
 
                     self._debug_log("submodule_done", "path={} updates={}".format(submodule_path, len(updates)))
 
@@ -437,10 +425,8 @@ class OTAUpdater:
                     self._debug_log("submodule_failed", "path={}".format(submodule_path))
                     pass
 
-        # Deleted files are those that exist locally but were not found remotely.
-        for local_path in sorted(local_files_set):
-            if local_path not in remote_paths_set:
-                updates.append({"path": local_path, "status": "deleted"})
+        # Do not flag device-only files as deleted; remote is canonical for
+        # what to update but device files not in the repo are left untouched.
 
         self._debug_log(
             "compare_done",
@@ -543,16 +529,6 @@ class OTAUpdater:
                         file_bytes = self._download_raw_file(path, branch_name)
                     self._write_file(path, file_bytes)
                     applied_files.append(path)
-                except Exception as error:
-                    failed_files.append({"path": path, "error": str(error)})
-            elif status == "locally_modified":
-                # Skip locally-modified files (user chose to keep local version)
-                pass
-            elif status == "deleted" and remove_deleted:
-                try:
-                    if self._path_exists(path):
-                        os.remove(path)
-                    removed_files.append(path)
                 except Exception as error:
                     failed_files.append({"path": path, "error": str(error)})
 

@@ -9,6 +9,9 @@ from time import sleep
 from audio import AudioPlayer, NoPlayersAvailable
 from storage import PersistentDict
 
+# Global flag: when True, blocks all sounds except IP announcement
+_sound_unavailable: bool = False
+
 
 def _is_enabled_setting(value: object) -> bool:
     """Return True when a setting value represents an enabled/checked state."""
@@ -52,6 +55,34 @@ def _parse_non_negative_int(value: object) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def set_sound_unavailable(unavailable: bool) -> None:
+    """Set the global sound unavailable flag.
+
+    When True, blocks all regular sounds except IP announcement.
+    This is used to prevent sound collisions during system announcements.
+
+    Args:
+        unavailable: True to block sounds, False to allow them
+    """
+
+    global _sound_unavailable
+    _sound_unavailable = unavailable
+    if unavailable:
+        print("sound: sound blocked (unavailable)")
+    else:
+        print("sound: sound unblocked (available)")
+
+
+def is_sound_unavailable() -> bool:
+    """Check if sound is currently unavailable.
+
+    Returns:
+        True if sounds are blocked (during IP announcement), False otherwise
+    """
+
+    return _sound_unavailable
 
 
 class SoundManager:
@@ -140,8 +171,13 @@ class SoundManager:
 
         Raises:
             NoPlayersAvailable if no modules available
-            ValueError if sound title not found
+            ValueError if sound title not found or sound is unavailable
         """
+
+        # Block regular sounds when sound is unavailable (IP announcement in progress)
+        if is_sound_unavailable():
+            print(f"sound: blocked (unavailable) title='{title}'")
+            raise ValueError(f"Sound playback blocked (system announcement in progress)")
 
         sound: dict | None = self.get_sound_by_title(title)
         if sound is None:
