@@ -80,7 +80,15 @@ class Animation:
         self.running = True
 
         if _THREAD:
-            _thread.start_new_thread(self._run, ())
+            try:
+                _thread.start_new_thread(self._run, ())
+            except Exception as e:
+                # Roll back so a stuck `running` flag doesn't permanently
+                # block future start() calls if the thread never actually started.
+                self.running = False
+                self.stopped = True
+                print(f"animation: failed to start thread: {e}")
+                sys.print_exception(e)
         else:
             self._run()
 
