@@ -32,7 +32,15 @@ class Matrix8x8(framebuf.FrameBuffer):
     Matrix 0 is the left-most display; matrix `num-1` is the right-most.
     """
 
-    def __init__(self, spi, cs, num=1):
+    def __init__(self, spi, cs, num: int = 1):
+        """Create the chained-matrix framebuffer and initialize the hardware.
+
+        Args:
+            spi: Configured write-only SPI bus instance (machine.SPI).
+            cs: Chip-select pin instance (machine.Pin), driven low during writes.
+            num: Number of chained 8x8 modules.
+        """
+
         self._spi = spi
         self._cs  = cs
         self._num = num
@@ -47,14 +55,17 @@ class Matrix8x8(framebuf.FrameBuffer):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _write_all(self, reg, data):
+    def _write_all(self, reg: int, data: int) -> None:
         """Write the same (reg, data) pair to every module in the chain."""
+
         self._cs.value(0)
         for _ in range(self._num):
             self._spi.write(bytes([reg, data]))
         self._cs.value(1)
 
-    def _init_display(self):
+    def _init_display(self) -> None:
+        """Run the shutdown-configure-enable register sequence and clear the display."""
+
         for reg, val in (
             (_REG_SHUTDOWN,    0),   # enter shutdown to configure safely
             (_REG_DISPLAYTEST, 0),   # disable test mode
@@ -71,14 +82,16 @@ class Matrix8x8(framebuf.FrameBuffer):
     # Public API
     # ------------------------------------------------------------------
 
-    def brightness(self, value):
+    def brightness(self, value: int) -> None:
         """Set display brightness.  value must be 0 (min) … 15 (max)."""
+
         if not 0 <= value <= 15:
             raise ValueError("brightness must be 0-15")
         self._write_all(_REG_INTENSITY, value)
 
-    def show(self):
+    def show(self) -> None:
         """Push the current framebuffer contents to the physical display."""
+
         # _buffer layout: row `r`, matrix `m`  →  byte  r * num + m
         for row in range(8):
             self._cs.value(0)

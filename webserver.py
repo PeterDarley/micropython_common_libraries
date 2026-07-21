@@ -21,6 +21,8 @@ import os
 import gc
 import sys
 
+from utils import url_decode
+
 try:
     import _thread
 
@@ -125,10 +127,10 @@ def _parse_form_data(body_string: str) -> dict:
     for pair in body_string.split("&"):
         if "=" in pair:
             key, value = pair.split("=", 1)
-            key = _url_decode(key)
-            value = _url_decode(value)
+            key = url_decode(key)
+            value = url_decode(value)
         elif pair:
-            key = _url_decode(pair)
+            key = url_decode(pair)
             value = ""
         else:
             continue
@@ -141,28 +143,6 @@ def _parse_form_data(body_string: str) -> dict:
                 result[key] = [existing, value]
         else:
             result[key] = value
-
-    return result
-
-
-def _url_decode(encoded_string: str) -> str:
-    """Decode a URL-encoded string (replaces %XX sequences and + with space)."""
-
-    decoded = encoded_string.replace("+", " ")
-    result = ""
-    index = 0
-
-    while index < len(decoded):
-        if decoded[index] == "%" and index + 2 < len(decoded):
-            try:
-                result += chr(int(decoded[index + 1 : index + 3], 16))
-                index += 3
-            except ValueError:
-                result += decoded[index]
-                index += 1
-        else:
-            result += decoded[index]
-            index += 1
 
     return result
 
@@ -687,6 +667,8 @@ def _process_includes(text: str, context: dict, templates_dir: str) -> str:
 
 
 class WebServer:
+    """Singleton HTTP server: socket accept loop, per-client threads, route dispatch, and static file serving."""
+
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -1057,6 +1039,32 @@ class WebServer:
         except OSError as error:
             self._log("websrv: send response failed", error)
 
+    def _file_cache_headers(self, file_path: str, content_type: str) -> tuple:
+        """Return (file_size, cache_control, etag) for a file, computed from its stat().
+
+        Shared by _send_file_static/_send_file since both need identical
+        size/mtime-based ETag and Cache-Control values.
+        """
+
+        stat = os.stat(file_path)
+        file_size = stat[6]
+        file_mtime = stat[8] if len(stat) > 8 else 0
+
+        etag = '"{}-{}"'.format(file_size, file_mtime)
+        cache_control = self._cache_control_for_content_type(content_type)
+        return file_size, cache_control, etag
+
+    def _stream_file_chunks(self, cl_sock, file_path: str) -> None:
+        """Stream file_path's contents to cl_sock in 4KB chunks."""
+
+        chunk_size = 4096
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                self._send_all(cl_sock, chunk)
+
     def _send_file_static(self, cl_sock, file_path: str, content_type: str, keep_alive: bool = False) -> None:
         """Send a static file from the www directory with caching headers.
 
@@ -1065,25 +1073,13 @@ class WebServer:
         """
 
         try:
-            stat = os.stat(file_path)
-            file_size = stat[6]
-            file_mtime = stat[8] if len(stat) > 8 else 0
-
-            etag = '"{}-{}"'.format(file_size, file_mtime)
-            cache_control = self._cache_control_for_content_type(content_type)
+            file_size, cache_control, etag = self._file_cache_headers(file_path, content_type)
 
             header = "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nETag: {}\r\nConnection: {}\r\n\r\n".format(
                 content_type, file_size, cache_control, etag, "keep-alive" if keep_alive else "close"
             )
             self._send_all(cl_sock, header.encode("utf-8"))
-
-            chunk_size = 4096
-            with open(file_path, "rb") as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    self._send_all(cl_sock, chunk)
+            self._stream_file_chunks(cl_sock, file_path)
 
         except OSError as error:
             self._log("websrv: send static file failed", file_path, error)
@@ -1091,20 +1087,13 @@ class WebServer:
     def _send_file(self, cl_sock, file_path: str, status_code: int, reason: str, content_type: str) -> None:
         """Send an HTTP response streaming from a file on disk.
 
-        Streams the file in 1KB chunks to avoid loading it all into memory.
+        Streams the file in 4KB chunks to avoid loading it all into memory.
         Includes Cache-Control and ETag headers for static asset caching.
         Cleans up the file after sending.
         """
 
         try:
-            # Get file stats (size at index 6, mtime at index 8 in MicroPython)
-            stat = os.stat(file_path)
-            file_size = stat[6]
-            file_mtime = stat[8] if len(stat) > 8 else 0
-
-            # Generate simple ETag from size and mtime
-            etag = '"{}-{}"'.format(file_size, file_mtime)
-            cache_control = self._cache_control_for_content_type(content_type)
+            file_size, cache_control, etag = self._file_cache_headers(file_path, content_type)
 
             # Send HTTP headers with caching directives
             header = "HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nETag: {}\r\n\r\n".format(
@@ -1112,15 +1101,8 @@ class WebServer:
             )
             self._send_all(cl_sock, header.encode("utf-8"))
 
-            # Stream file in 4KB chunks
-            chunk_size = 4096
             try:
-                with open(file_path, "rb") as f:
-                    while True:
-                        chunk = f.read(chunk_size)
-                        if not chunk:
-                            break
-                        self._send_all(cl_sock, chunk)
+                self._stream_file_chunks(cl_sock, file_path)
             finally:
                 # Clean up the temp file
                 try:

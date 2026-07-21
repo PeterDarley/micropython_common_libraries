@@ -23,6 +23,7 @@ import socket
 import network  # type: ignore
 
 from storage import PersistentDict
+from utils import url_decode
 
 _AP_IP: str = "192.168.4.1"
 
@@ -141,40 +142,6 @@ def _run_dns_server(stop_flag: list) -> None:
 
     finally:
         dns_socket.close()
-
-
-# ---------------------------------------------------------------------------
-# URL decode helper
-# ---------------------------------------------------------------------------
-
-
-def _url_decode(encoded: str) -> str:
-    """Decode a URL-encoded string (``%XX`` sequences and ``+`` → space).
-
-    Args:
-        encoded: URL-encoded input string.
-
-    Returns:
-        Decoded plain string.
-    """
-
-    decoded: str = encoded.replace("+", " ")
-    result: str = ""
-    index: int = 0
-
-    while index < len(decoded):
-        if decoded[index] == "%" and index + 2 < len(decoded):
-            try:
-                result += chr(int(decoded[index + 1 : index + 3], 16))
-                index += 3
-            except ValueError:
-                result += decoded[index]
-                index += 1
-        else:
-            result += decoded[index]
-            index += 1
-
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +458,7 @@ class CaptivePortal:
                     for pair in form_body.split("&"):
                         if "=" in pair:
                             key, value = pair.split("=", 1)
-                            form[_url_decode(key)] = _url_decode(value)
+                            form[url_decode(key)] = url_decode(value)
 
                     ssid: str = form.get("ssid", "").strip()
                     # Fallback: if JS didn't set the hidden field, use the manual input

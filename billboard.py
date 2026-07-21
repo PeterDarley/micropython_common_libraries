@@ -30,8 +30,9 @@ from max7219 import Matrix8x8
 
 
 class Billboard:
+    """High-level text/scroll driver for one or more chained MAX7219 8x8 LED matrices."""
 
-    def __init__(self, *, mosi, sck, cs, num=1, brightness=5, debug=False):
+    def __init__(self, *, mosi: int, sck: int, cs: int, num: int = 1, brightness: int = 5, debug: bool = False):
         """
         Parameters
         ----------
@@ -42,6 +43,7 @@ class Billboard:
         brightness : initial brightness 0-15
         debug      : print debug messages
         """
+
         self._num   = num
         self._debug = debug
 
@@ -62,8 +64,9 @@ class Billboard:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_settings(cls, debug=False):
+    def from_settings(cls, debug: bool = False) -> "Billboard":
         """Construct a Billboard using settings.BILLBOARD."""
+
         import settings
         cfg = settings.BILLBOARD
         return cls(
@@ -80,49 +83,56 @@ class Billboard:
     # ------------------------------------------------------------------
 
     @property
-    def width(self):
+    def width(self) -> int:
         """Display width in pixels."""
+
         return self._num * 8
 
     @property
-    def matrix(self):
+    def matrix(self) -> Matrix8x8:
         """Direct access to the underlying Matrix8x8 FrameBuffer."""
+
         return self._matrix
 
     # ------------------------------------------------------------------
     # Basic operations
     # ------------------------------------------------------------------
 
-    def clear(self):
+    def clear(self) -> None:
         """Clear the display."""
+
         self._matrix.fill(0)
         self._matrix.show()
 
-    def set_brightness(self, value):
+    def set_brightness(self, value: int) -> None:
         """Set brightness 0-15."""
+
         self._matrix.brightness(value)
 
-    def show(self):
+    def show(self) -> None:
         """Push framebuffer to display (use after drawing to self.matrix directly)."""
+
         self._matrix.show()
 
     # ------------------------------------------------------------------
     # Text helpers
     # ------------------------------------------------------------------
 
-    def static_text(self, msg, x=0, y=0):
+    def static_text(self, msg: str, x: int = 0, y: int = 0) -> None:
         """Display static text at pixel offset (x, y).  Text is clipped to display width."""
+
         self._matrix.fill(0)
         self._matrix.text(msg, x, y, 1)
         self._matrix.show()
         if self._debug:
             print('billboard: static_text:', repr(msg))
 
-    def _scroll_text_blocking(self, msg, delay_ms=60, repeat=1):
+    def _scroll_text_blocking(self, msg: str, delay_ms: int = 60, repeat: int = 1) -> None:
         """
         Internal: Scroll text from right to left (blocking).
         Use scroll_text() instead, which runs this in the background.
         """
+
         self._scrolling = True
         self._scroll_stop = False
         try:
@@ -156,7 +166,7 @@ class Billboard:
         finally:
             self._scrolling = False
 
-    def scroll_text(self, msg, delay_ms=60, repeat=1):
+    def scroll_text(self, msg: str, delay_ms: int = 60, repeat: int = 1) -> None:
         """
         Scroll text from right to left across the display (non-blocking).
 
@@ -171,6 +181,7 @@ class Billboard:
 
         Runs in background thread if available; blocks otherwise.
         """
+
         if _THREAD:
             if self._scrolling:
                 if self._debug:
@@ -188,12 +199,13 @@ class Billboard:
     # Low-level pixel access
     # ------------------------------------------------------------------
 
-    def set_pixel(self, x, y, val=1):
+    def set_pixel(self, x: int, y: int, val: int = 1) -> None:
         """Set a single pixel and push to display."""
+
         self._matrix.pixel(x, y, val)
         self._matrix.show()
 
-    def fill_pattern(self, pattern):
+    def fill_pattern(self, pattern: list) -> None:
         """
         Fill from a flat list of bytes organised as:
             [module0_row0, module0_row1, ... module0_row7,
@@ -202,6 +214,7 @@ class Billboard:
         Total length must be 8 * num_modules.
         Multiplying an 8-byte single-module pattern by num gives the correct layout.
         """
+
         if len(pattern) != 8 * self._num:
             raise ValueError("pattern must be {} bytes".format(8 * self._num))
         self._matrix.fill(0)

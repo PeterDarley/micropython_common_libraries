@@ -97,6 +97,13 @@ class OnboardLED:
 
 
 class LEDs:
+    """Singleton controller treating one or more NeoPixel strips as a single logical LED string.
+
+    Handles per-strip color-order remapping, global brightness scaling, and the
+    optional quadratic brightness curve, with contiguous logical indices spanning
+    every configured strip.
+    """
+
     _instance = None
 
     def __new__(
@@ -161,7 +168,7 @@ class LEDs:
 
         self.count = total_count
         self._brightness = 1.0
-        self._brightness_curve = self._parse_brightness_curve_setting()
+        self._brightness_curve = self._parse_brightness_curve_setting(strips_config)
         self.brightness = brightness
         self._initialised = True
 
@@ -249,13 +256,16 @@ class LEDs:
 
         return []
 
-    def _parse_brightness_curve_setting(self) -> bool:
+    def _parse_brightness_curve_setting(self, strips_config: list) -> bool:
         """Check if brightness curve adjustment is enabled in settings.
+
+        Args:
+            strips_config: Already-parsed strip configs (see ``_parse_neopixels_config``),
+                passed in to avoid re-parsing settings that ``__init__`` already parsed.
 
         Returns:
             True if BrightnessCurve is enabled in NEOPIXELS settings, False otherwise.
         """
-        strips_config = self._parse_neopixels_config()
         if strips_config:
             return any(bool(strip.get("brightness_curve", False)) for strip in strips_config)
 
